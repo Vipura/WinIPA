@@ -1,6 +1,6 @@
 {
   "name": "winipa",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Test your iOS apps on your iPhone from Windows without a Mac",
   "private": true,
   "type": "module",

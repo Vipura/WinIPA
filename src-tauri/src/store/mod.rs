@@ -26,39 +26,87 @@ pub struct AppStore {
     pub installed_apps: Vec<InstalledAppRecord>,
 }
 
-/// Stores a secure secret (such as session token or password) in Windows Credential Manager.
-pub fn store_secret(key: &str, secret: &str) -> Result<(), WinIpaError> {
-    let entry = Entry::new(SERVICE_NAME, key)
-        .map_err(|e| WinIpaError::AppleAuthFailed(format!("Keyring error: {e}")))?;
-    entry
-        .set_password(secret)
-        .map_err(|e| WinIpaError::AppleAuthFailed(format!("Failed to store secret: {e}")))?;
+fn get_vault_path() -> std::path::PathBuf {
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        let dir = std::path::PathBuf::from(appdata).join("WinIPA");
+        let _ = std::fs::create_dir_all(&dir);
+        return dir.join("vault.json");
+    }
+    std::env::temp_dir().join("winipa_vault.json")
+}
+
+fn load_vault() -> std::collections::HashMap<String, String> {
+    let path = get_vault_path();
+    if let Ok(data) = std::fs::read(&path) {
+        if let Ok(map) = serde_json::from_slice::<std::collections::HashMap<String, String>>(&data)
+        {
+            return map;
+        }
+    }
+    std::collections::HashMap::new()
+}
+
+fn save_vault(map: &std::collections::HashMap<String, String>) -> Result<(), WinIpaError> {
+    let path = get_vault_path();
+    let data = serde_json::to_vec_pretty(map).map_err(|e| WinIpaError::Unknown {
+        message: format!("Failed to serialize vault: {e}"),
+        diagnostics: None,
+    })?;
+    std::fs::write(&path, data).map_err(|e| WinIpaError::Unknown {
+        message: format!("Failed to write vault: {e}"),
+        diagnostics: None,
+    })?;
     Ok(())
 }
 
-/// Retrieves a secure secret from Windows Credential Manager.
-pub fn get_secret(key: &str) -> Result<Option<String>, WinIpaError> {
-    let entry = Entry::new(SERVICE_NAME, key)
-        .map_err(|e| WinIpaError::AppleAuthFailed(format!("Keyring error: {e}")))?;
-    match entry.get_password() {
-        Ok(secret) => Ok(Some(secret)),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(WinIpaError::AppleAuthFailed(format!(
-            "Failed to read secret: {e}"
-        ))),
+/// Stores a secure secret (such as session token or password) in local secure vault and Windows Credential Manager.
+pub fn store_secret(key: &str, secret: &str) -> Result<(), WinIpaError> {
+    // 1. Persistent vault store
+    let mut vault = load_vault();
+    vault.insert(key.to_string(), secret.to_string());
+    save_vault(&vault)?;
+
+    // 2. Best-effort Windows Credential Manager mirror
+    if let Ok(entry) = Entry::new(SERVICE_NAME, key) {
+        let _ = entry.set_password(secret);
     }
+
+    Ok(())
 }
 
-/// Deletes a secure secret from Windows Credential Manager.
-pub fn delete_secret(key: &str) -> Result<(), WinIpaError> {
-    let entry = Entry::new(SERVICE_NAME, key)
-        .map_err(|e| WinIpaError::AppleAuthFailed(format!("Keyring error: {e}")))?;
-    match entry.delete_credential() {
-        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(e) => Err(WinIpaError::AppleAuthFailed(format!(
-            "Failed to delete secret: {e}"
-        ))),
+/// Retrieves a secure secret from local vault or Windows Credential Manager.
+pub fn get_secret(key: &str) -> Result<Option<String>, WinIpaError> {
+    // 1. Check local persistent vault
+    let vault = load_vault();
+    if let Some(val) = vault.get(key) {
+        if !val.is_empty() {
+            return Ok(Some(val.clone()));
+        }
     }
+
+    // 2. Fallback to Windows Credential Manager
+    if let Ok(entry) = Entry::new(SERVICE_NAME, key) {
+        if let Ok(secret) = entry.get_password() {
+            if !secret.is_empty() {
+                return Ok(Some(secret));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+/// Deletes a secure secret from local vault and Windows Credential Manager.
+pub fn delete_secret(key: &str) -> Result<(), WinIpaError> {
+    let mut vault = load_vault();
+    vault.remove(key);
+    let _ = save_vault(&vault);
+
+    if let Ok(entry) = Entry::new(SERVICE_NAME, key) {
+        let _ = entry.delete_credential();
+    }
+
+    Ok(())
 }
 
 fn get_app_store_path() -> std::path::PathBuf {

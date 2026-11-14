@@ -9,10 +9,11 @@ use crate::errors::WinIpaError;
 use crate::store::{delete_secret, get_secret, store_secret};
 use async_trait::async_trait;
 use plist::Value;
+use reqwest::cookie::{CookieStore, Jar};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use std::collections::HashMap;
 use std::io::Cursor;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub const DEVELOPER_API_BASE: &str = "https://developerservices2.apple.com/services/QH65B2";
@@ -23,6 +24,7 @@ pub const AUTHKIT_VERIFY_2FA_URL: &str =
 pub struct AppleDeveloperClient {
     pub anisette: Box<dyn AnisetteProvider>,
     pub http_client: reqwest::Client,
+    pub cookie_jar: Arc<Jar>,
     pub session: Mutex<Option<AppleSessionInfo>>,
     pub session_token: Mutex<Option<String>>,
     pub pending_apple_id: Option<String>,
@@ -31,7 +33,7 @@ pub struct AppleDeveloperClient {
     pub pending_scnt: Option<String>,
 }
 
-/// Helper function to reliably extract an Apple session token / myacinfo cookie
+/// Helper function to extract an Apple session token / myacinfo cookie
 fn extract_apple_session_token(headers: &HeaderMap, fallback: Option<&str>) -> Option<String> {
     // 1. Direct x-apple-session-token header
     if let Some(t) = headers
@@ -64,15 +66,17 @@ fn extract_apple_session_token(headers: &HeaderMap, fallback: Option<&str>) -> O
 
 impl AppleDeveloperClient {
     pub fn new(anisette_url: Option<String>) -> Self {
+        let cookie_jar = Arc::new(Jar::default());
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(20))
-            .cookie_store(true)
+            .cookie_provider(cookie_jar.clone())
             .build()
             .unwrap_or_default();
 
         Self {
             anisette: Box::new(RemoteAnisetteProvider::new(anisette_url)),
             http_client: client,
+            cookie_jar,
             session: Mutex::new(None),
             session_token: Mutex::new(None),
             pending_apple_id: None,
@@ -82,8 +86,27 @@ impl AppleDeveloperClient {
         }
     }
 
-    /// Retrieves the active session token from memory or restores from Windows Credential Manager.
+    /// Extracts `myacinfo` cookie from the client's cookie jar.
+    fn extract_myacinfo_from_jar(&self) -> Option<String> {
+        let apple_url = reqwest::Url::parse("https://apple.com").ok()?;
+        if let Some(cookie_hdr) = self.cookie_jar.cookies(&apple_url) {
+            if let Ok(c_str) = cookie_hdr.to_str() {
+                for part in c_str.split(';') {
+                    let part = part.trim();
+                    if let Some(val) = part.strip_prefix("myacinfo=") {
+                        if !val.is_empty() {
+                            return Some(val.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Retrieves the active session token from memory, cookie jar, or persistent vault.
     fn get_or_restore_session_token(&self) -> Option<String> {
+        // 1. In-memory session_token
         if let Ok(guard) = self.session_token.lock() {
             if let Some(ref t) = *guard {
                 if !t.is_empty() {
@@ -92,7 +115,15 @@ impl AppleDeveloperClient {
             }
         }
 
-        // Try Windows Credential Manager
+        // 2. Cookie jar
+        if let Some(token) = self.extract_myacinfo_from_jar() {
+            if let Ok(mut guard) = self.session_token.lock() {
+                *guard = Some(token.clone());
+            }
+            return Some(token);
+        }
+
+        // 3. Persistent vault
         if let Ok(Some(apple_id)) = get_secret("active_apple_id") {
             if let Ok(Some(token)) = get_secret(&format!("session:{apple_id}")) {
                 if !token.is_empty() {
@@ -101,6 +132,13 @@ impl AppleDeveloperClient {
                     }
                     return Some(token);
                 }
+            }
+        }
+
+        // 4. Pending session ID fallback
+        if let Some(ref pending) = self.pending_session_id {
+            if !pending.is_empty() {
+                return Some(pending.clone());
             }
         }
 
@@ -166,7 +204,7 @@ impl AppleDeveloperClient {
     ) -> Result<Value, WinIpaError> {
         let token = self.get_or_restore_session_token().ok_or_else(|| {
             WinIpaError::AppleAuthFailed(
-                "No active Apple developer session. Please sign in with your Apple ID in Device & Account.".into(),
+                "No active Apple developer session. Please click 'Sign Out' in Device & Account and log in again to establish a fresh session.".into(),
             )
         })?;
 
@@ -250,7 +288,7 @@ impl AppleDeveloperClient {
                     return match result_code {
                         35 => Err(WinIpaError::AccountLimitReached(err_string.into())),
                         1100 => Err(WinIpaError::AppleAuthFailed(
-                            "Apple developer session expired. Please sign in again in Device & Account.".into(),
+                            "Apple developer session expired. Please click 'Sign Out' in Device & Account and log in again.".into(),
                         )),
                         3038 | 3041 => Err(WinIpaError::AppleRateLimited),
                         _ => Err(WinIpaError::Unknown {
@@ -371,6 +409,9 @@ impl AppleService for AppleDeveloperClient {
             if let Some(scnt) = resp_headers.get("scnt").and_then(|v| v.to_str().ok()) {
                 self.pending_scnt = Some(scnt.to_string());
             }
+            if self.pending_session_id.is_none() {
+                self.pending_session_id = self.extract_myacinfo_from_jar();
+            }
 
             return Ok(LoginResult::TwoFactorRequired {
                 phone_numbers: vec!["Trusted Apple Devices / SMS".into()],
@@ -378,7 +419,9 @@ impl AppleService for AppleDeveloperClient {
         }
 
         // Direct success without 2FA
-        let token_opt = extract_apple_session_token(&resp_headers, None);
+        let token_opt = extract_apple_session_token(&resp_headers, None)
+            .or_else(|| self.extract_myacinfo_from_jar());
+
         if let Some(ref token) = token_opt {
             if let Ok(mut lock) = self.session_token.lock() {
                 *lock = Some(token.clone());
@@ -457,7 +500,9 @@ impl AppleService for AppleDeveloperClient {
 
         let resp_headers = resp.headers().clone();
         let token_opt =
-            extract_apple_session_token(&resp_headers, self.pending_session_id.as_deref());
+            extract_apple_session_token(&resp_headers, self.pending_session_id.as_deref())
+                .or_else(|| self.extract_myacinfo_from_jar())
+                .or_else(|| self.pending_session_id.clone());
 
         if let Some(ref token) = token_opt {
             if let Ok(mut lock) = self.session_token.lock() {
@@ -504,19 +549,28 @@ impl AppleService for AppleDeveloperClient {
     }
 
     async fn get_active_session(&self) -> Result<Option<AppleSessionInfo>, WinIpaError> {
+        // If we have an active session in memory, verify whether we have a session token
         if let Ok(guard) = self.session.lock() {
             if let Some(ref s) = *guard {
-                return Ok(Some(s.clone()));
+                if self.get_or_restore_session_token().is_some() {
+                    return Ok(Some(s.clone()));
+                }
             }
         }
 
-        // Check Windows Credential Manager for stored session
+        // Check persistent store for stored session
         if let Ok(Some(apple_id)) = get_secret("active_apple_id") {
             // Restore session token
             if let Ok(Some(token)) = get_secret(&format!("session:{apple_id}")) {
                 if let Ok(mut guard) = self.session_token.lock() {
                     *guard = Some(token);
                 }
+            }
+
+            let has_token = self.get_or_restore_session_token().is_some();
+            if !has_token {
+                // If there is no token, do not return a fake active session
+                return Ok(None);
             }
 
             let session_info = if let Ok(Some(info_json)) = get_secret(&format!("info:{apple_id}"))
