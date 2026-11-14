@@ -9,7 +9,7 @@ WinIPA is an open-source Windows desktop application licensed under the **GNU Ge
 
 ## Project Status
 
-> **Status: Milestones 0, 1, 2, 3 & 4 Completed**
+> **Status: Ready for Release (v0.1.0) / Milestones 0 through 5 Completed**
 
 ### What Works Now
 - **Desktop UI Shell**: Modern desktop interface with clean dark and light themes, keyboard navigation, and centralized localizable strings.
@@ -17,7 +17,7 @@ WinIPA is an open-source Windows desktop application licensed under the **GNU Ge
   - *Install IPA* (Fully implemented 8-step flow)
   - *From GitHub Release* (Coming soon badge)
   - *Build from repo/folder* (Coming soon badge)
-  - *Device & Account* (Device info, Apple ID status, cert expiry, installed apps table)
+  - *Device & Account* (Device info, Apple ID status, cert expiry, installed apps table, diagnostics export)
 - **USB Device Layer (M1)**: Detects Apple Mobile Device Service (AMDS) and USB driver presence, monitors device connection/disconnection via `usbmuxd`, reads device name, iOS version, trust state, and Developer Mode state.
 - **IPA Inspector (M2)**: Unzips IPAs, parses `Payload/*.app/Info.plist`, extracts app icon to data URI, checks minimum iOS version compatibility, and inspects Mach-O binaries for FairPlay DRM encryption (`cryptid != 0`).
 - **Apple ID & Provisioning (M3)**: Secure local authentication with Apple ID & 2FA, development certificate issuance (2048-bit RSA CSR generation), device registration, App ID provisioning, and Windows Credential Manager session persistence.
@@ -27,9 +27,14 @@ WinIPA is an open-source Windows desktop application licensed under the **GNU Ge
   - USB file upload over Apple File Conduit (AFC) protocol framing.
   - App installation and SpringBoard registration via `com.apple.mobile.installation_proxy`.
   - Full 8-step pipeline with live progress streaming, cancellation support, and local app store persistence (`installed_apps.json`).
+- **Release Polish & Diagnostics (M5)**:
+  - Installed apps store with live 7-day expiration countdown and 1-click re-sign shortcuts.
+  - Full Redacted System Diagnostics export to file (`%APPDATA%\WinIPA\diagnostics.txt`) and clipboard.
+  - Comprehensive [Troubleshooting Guide](docs/TROUBLESHOOTING.md) covering AMDS, trust dialogs, Developer Mode, FairPlay DRM, and installation errors.
+  - Automated GitHub Actions Release Workflow (`.github/workflows/release.yml`) building NSIS (`.exe`) and WiX (`.msi`) installers with `SHA256SUMS.txt` on tag push (`v*`).
 - **Typed Error System**: Full Rust typed error hierarchy (`WinIpaError`) with user-friendly titles, plain-language causes, and actionable remedies.
 - **Security & Redaction**: Built-in redaction engine for logs and diagnostics covering Apple IDs, UDIDs, 2FA codes, and session secrets.
-- **Continuous Integration**: GitHub Actions workflow running formatting, clippy, strict TypeScript checks, frontend build, and 37 Rust unit/integration tests.
+- **Continuous Integration**: GitHub Actions workflow running formatting, clippy, strict TypeScript checks, frontend build, and 39 Rust unit/integration tests.
 
 ### What is Untested on Physical Hardware
 - Real physical iPhone USB deployment testing depends on physical device availability (verified with comprehensive mock USB/lockdown test suites).
@@ -54,6 +59,7 @@ WinIPA is an open-source Windows desktop application licensed under the **GNU Ge
 
 ## Documentation
 - [Architecture & Library Decisions](docs/ARCHITECTURE.md)
+- [Troubleshooting & FAQ](docs/TROUBLESHOOTING.md)
 - [Setup & Developer Guide](docs/SETUP.md)
 - [Third-Party Licenses](THIRD_PARTY_LICENSES.md)
 
