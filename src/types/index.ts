@@ -73,3 +73,35 @@ export interface InstalledAppRecord {
   installed_at: number;
   cert_expires_at: number;
 }
+
+export type PipelineStep =
+  | "Idle"
+  | "Inspecting"
+  | "ValidatingDevice"
+  | "Authenticating"
+  | "Provisioning"
+  | "Signing"
+  | "Installing"
+  | "Completed"
+  | "Failed"
+  | "Cancelled";
+
+export interface PipelineStatus {
+  step: PipelineStep;
+  progress: number;
+  message: string;
+}
+
+export interface PipelineRequest {
+  ipa_path: string;
+  target_udid: string;
+  custom_bundle_id?: string;
+}
+
+export interface PipelineResult {
+  app_name: string;
+  bundle_id: string;
+  version: string;
+  stripped_entitlements: string[];
+  cert_expires_at?: number;
+}

@@ -17,6 +17,7 @@ import {
   appleGetSession,
   appleLogout,
 } from "../api/apple";
+import { getInstalledApps, removeInstalledApp } from "../api/pipeline";
 import {
   Smartphone,
   User,
@@ -34,6 +35,7 @@ import {
   Calendar,
   CheckCircle2,
   Info,
+  Trash2,
 } from "lucide-react";
 
 interface DeviceAccountScreenProps {
@@ -44,7 +46,7 @@ export const DeviceAccountScreen: React.FC<DeviceAccountScreenProps> = ({ onNavi
   const [driverStatus, setDriverStatus] = useState<DeviceDriverStatus | null>(null);
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
   const [appleSession, setAppleSession] = useState<AppleSessionInfo | null>(null);
-  const [installedApps] = useState<InstalledAppRecord[]>([]);
+  const [installedApps, setInstalledApps] = useState<InstalledAppRecord[]>([]);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
 
   // Auth Modal State
@@ -70,6 +72,10 @@ export const DeviceAccountScreen: React.FC<DeviceAccountScreenProps> = ({ onNavi
       // Check for active Apple session
       const session = await appleGetSession();
       setAppleSession(session);
+
+      // Load installed sideloaded apps
+      const apps = await getInstalledApps();
+      setInstalledApps(apps);
     } catch (err) {
       console.error("Failed to load device/driver/session status:", err);
     }
@@ -112,6 +118,8 @@ export const DeviceAccountScreen: React.FC<DeviceAccountScreenProps> = ({ onNavi
       }
       const session = await appleGetSession();
       setAppleSession(session);
+      const apps = await getInstalledApps();
+      setInstalledApps(apps);
     } catch (err) {
       console.error("Error refreshing devices/session:", err);
     } finally {
@@ -193,6 +201,15 @@ export const DeviceAccountScreen: React.FC<DeviceAccountScreenProps> = ({ onNavi
       setAppleSession(null);
     } catch (err) {
       console.error("Failed to log out:", err);
+    }
+  };
+
+  const handleRemoveApp = async (bundleId: string) => {
+    try {
+      await removeInstalledApp(bundleId);
+      setInstalledApps((prev) => prev.filter((a) => a.bundle_id !== bundleId));
+    } catch (err) {
+      console.error("Failed to remove app from store:", err);
     }
   };
 
@@ -483,7 +500,66 @@ export const DeviceAccountScreen: React.FC<DeviceAccountScreenProps> = ({ onNavi
         {installedApps.length === 0 ? (
           <p className="empty-msg text-center">{STRINGS.device.noApps}</p>
         ) : (
-          <div className="installed-apps-table"></div>
+          <div style={{ overflowX: "auto" }}>
+            <table className="installed-apps-table">
+              <thead>
+                <tr>
+                  <th>App Name</th>
+                  <th>Bundle ID</th>
+                  <th>Version</th>
+                  <th>Installed Date</th>
+                  <th>Certificate Expiry</th>
+                  <th style={{ textAlign: "right" }}>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {installedApps.map((app) => {
+                  const days = calculateDaysLeft(app.cert_expires_at);
+                  return (
+                    <tr key={app.bundle_id}>
+                      <td style={{ fontWeight: 600 }}>{app.app_name}</td>
+                      <td>
+                        <code className="font-mono" style={{ fontSize: "0.8rem" }}>
+                          {app.bundle_id}
+                        </code>
+                      </td>
+                      <td>{app.version}</td>
+                      <td>{new Date(app.installed_at * 1000).toLocaleDateString()}</td>
+                      <td>
+                        {days !== null ? (
+                          days > 0 ? (
+                            <span
+                              className={`cert-expiry-pill ${
+                                days > 2 ? "valid" : "expiring-soon"
+                              }`}
+                            >
+                              <Calendar size={12} style={{ display: "inline", marginRight: "4px" }} />
+                              {days} {days === 1 ? "day" : "days"} left
+                            </span>
+                          ) : (
+                            <span className="status-pill pill-danger">Expired</span>
+                          )
+                        ) : (
+                          <span className="text-muted">N/A</span>
+                        )}
+                      </td>
+                      <td style={{ textAlign: "right" }}>
+                        <button
+                          type="button"
+                          className="btn btn-outline btn-sm text-danger"
+                          onClick={() => handleRemoveApp(app.bundle_id)}
+                          title="Remove from history"
+                          style={{ padding: "0.25rem 0.5rem" }}
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         )}
       </section>
 

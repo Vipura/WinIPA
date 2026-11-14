@@ -1,19 +1,40 @@
 // Copyright (C) 2026 WinIPA Contributors
 // SPDX-License-Identifier: GPL-3.0-only
 
-import React, { useState, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { STRINGS } from "../strings";
-import { IpaMetadata, ErrorDetail } from "../types";
+import {
+  IpaMetadata,
+  ErrorDetail,
+  DeviceInfo,
+  AppleSessionInfo,
+  PipelineStatus,
+  PipelineResult,
+} from "../types";
 import { inspectIpaPackage } from "../api/ipa";
+import { getConnectedDevices } from "../api/device";
+import { appleGetSession } from "../api/apple";
+import {
+  startInstallationPipeline,
+  cancelInstallationPipeline,
+  listenToPipelineStatus,
+} from "../api/pipeline";
 import {
   ArrowLeft,
   UploadCloud,
   Package,
   AlertTriangle,
   CheckCircle2,
-  ArrowRight,
   RefreshCw,
   FileCode,
+  Smartphone,
+  User,
+  ShieldCheck,
+  ShieldAlert,
+  XCircle,
+  Copy,
+  Check,
+  Info,
 } from "lucide-react";
 
 interface InstallIpaScreenProps {
@@ -28,14 +49,67 @@ export const InstallIpaScreen: React.FC<InstallIpaScreenProps> = ({ onNavigate }
   const [manualPath, setManualPath] = useState<string>("");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Device & Account prerequisites
+  const [devices, setDevices] = useState<DeviceInfo[]>([]);
+  const [selectedUdid, setSelectedUdid] = useState<string>("");
+  const [appleSession, setAppleSession] = useState<AppleSessionInfo | null>(null);
+  const [customBundleId, setCustomBundleId] = useState<string>("");
+
+  // Pipeline execution state
+  const [isPipelineRunning, setIsPipelineRunning] = useState<boolean>(false);
+  const [pipelineStatus, setPipelineStatus] = useState<PipelineStatus>({
+    step: "Idle",
+    progress: 0,
+    message: "",
+  });
+  const [pipelineResult, setPipelineResult] = useState<PipelineResult | null>(null);
+  const [pipelineError, setPipelineError] = useState<string | null>(null);
+  const [copiedDiagnostics, setCopiedDiagnostics] = useState<boolean>(false);
+
+  // Load prerequisites on mount
+  const refreshPrerequisites = useCallback(async () => {
+    try {
+      const devs = await getConnectedDevices();
+      setDevices(devs);
+      if (devs.length > 0 && !selectedUdid) {
+        setSelectedUdid(devs[0].udid);
+      }
+      const session = await appleGetSession();
+      setAppleSession(session);
+    } catch (err) {
+      console.error("Failed to load prerequisites:", err);
+    }
+  }, [selectedUdid]);
+
+  useEffect(() => {
+    refreshPrerequisites();
+  }, [refreshPrerequisites]);
+
+  // Subscribe to pipeline progress events
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listenToPipelineStatus((status) => {
+      setPipelineStatus(status);
+    }).then((unsub) => {
+      unlisten = unsub;
+    });
+
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
   const handleInspect = async (filePath: string) => {
     setIsInspecting(true);
     setErrorDetail(null);
     setMetadata(null);
+    setPipelineResult(null);
+    setPipelineError(null);
 
     try {
       const meta = await inspectIpaPackage(filePath);
       setMetadata(meta);
+      await refreshPrerequisites();
     } catch (err: unknown) {
       const errorObj = err as ErrorDetail;
       if (errorObj && errorObj.title && errorObj.message) {
@@ -51,6 +125,68 @@ export const InstallIpaScreen: React.FC<InstallIpaScreenProps> = ({ onNavigate }
     } finally {
       setIsInspecting(false);
     }
+  };
+
+  const handleStartInstallation = async () => {
+    if (!metadata || !selectedUdid) return;
+
+    setIsPipelineRunning(true);
+    setPipelineError(null);
+    setPipelineResult(null);
+    setPipelineStatus({
+      step: "Inspecting",
+      progress: 5.0,
+      message: "Starting installation pipeline...",
+    });
+
+    try {
+      const res = await startInstallationPipeline({
+        ipa_path: metadata.file_path,
+        target_udid: selectedUdid,
+        custom_bundle_id: customBundleId.trim() || undefined,
+      });
+      setPipelineResult(res);
+      setPipelineStatus({
+        step: "Completed",
+        progress: 100.0,
+        message: "Installation complete!",
+      });
+    } catch (err: unknown) {
+      const msg = typeof err === "string" ? err : (err as Error)?.message || "Installation pipeline failed";
+      setPipelineError(msg);
+      setPipelineStatus({
+        step: "Failed",
+        progress: 0.0,
+        message: msg,
+      });
+    } finally {
+      setIsPipelineRunning(false);
+    }
+  };
+
+  const handleCancelPipeline = async () => {
+    try {
+      await cancelInstallationPipeline();
+    } catch (err) {
+      console.error("Failed to cancel pipeline:", err);
+    }
+  };
+
+  const handleCopyDiagnostics = () => {
+    const diagnostics = `--- WinIPA Diagnostics ---
+Target UDID: ${selectedUdid}
+Apple ID: ${appleSession?.apple_id || "None"}
+Team ID: ${appleSession?.team_id || "None"}
+App Name: ${metadata?.app_name || "None"}
+Bundle ID: ${metadata?.bundle_id || "None"}
+Status Step: ${pipelineStatus.step}
+Status Message: ${pipelineStatus.message}
+Error: ${pipelineError || "None"}
+Time: ${new Date().toISOString()}`;
+
+    navigator.clipboard.writeText(diagnostics);
+    setCopiedDiagnostics(true);
+    setTimeout(() => setCopiedDiagnostics(false), 2500);
   };
 
   const onDragOver = (e: React.DragEvent) => {
@@ -84,11 +220,24 @@ export const InstallIpaScreen: React.FC<InstallIpaScreenProps> = ({ onNavigate }
   };
 
   const loadFixture = (fixtureName: string) => {
-    // Relative path to generated fixture
     const path = `tests/fixtures/${fixtureName}`;
     setManualPath(path);
     handleInspect(path);
   };
+
+  const activeDevice = devices.find((d) => d.udid === selectedUdid) || (devices.length > 0 ? devices[0] : null);
+
+  // Check if free account will strip entitlements
+  const restrictedEntitlements = [
+    "aps-environment",
+    "com.apple.developer.associated-domains",
+    "com.apple.developer.in-app-payments",
+    "com.apple.developer.siri",
+    "com.apple.security.application-groups",
+  ];
+  const detectedStripped = metadata?.original_entitlements.filter((e) =>
+    restrictedEntitlements.some((r) => e.includes(r))
+  ) || [];
 
   return (
     <div className="install-ipa-screen">
@@ -106,13 +255,15 @@ export const InstallIpaScreen: React.FC<InstallIpaScreenProps> = ({ onNavigate }
           <h2 className="page-title">{STRINGS.installFlow.title}</h2>
         </div>
 
-        {metadata && (
+        {metadata && !isPipelineRunning && (
           <button
             type="button"
             className="btn btn-outline btn-sm"
             onClick={() => {
               setMetadata(null);
               setErrorDetail(null);
+              setPipelineResult(null);
+              setPipelineError(null);
             }}
           >
             Select Different IPA
@@ -120,6 +271,7 @@ export const InstallIpaScreen: React.FC<InstallIpaScreenProps> = ({ onNavigate }
         )}
       </div>
 
+      {/* Step 1: File Dropzone (if no IPA picked) */}
       {!metadata && !errorDetail && (
         <>
           <div
@@ -198,7 +350,7 @@ export const InstallIpaScreen: React.FC<InstallIpaScreenProps> = ({ onNavigate }
             <input
               type="text"
               className="path-input"
-              placeholder="Or enter absolute path to an .ipa file (e.g. C:\Users\User\Downloads\App.ipa)..."
+              placeholder="Or enter path to .ipa (e.g. C:\Users\User\Downloads\App.ipa)..."
               value={manualPath}
               onChange={(e) => setManualPath(e.target.value)}
               onKeyDown={(e) => {
@@ -250,8 +402,212 @@ export const InstallIpaScreen: React.FC<InstallIpaScreenProps> = ({ onNavigate }
         </div>
       )}
 
-      {/* Valid Inspection result presentation */}
-      {metadata && (
+      {/* Pipeline Active Progress View */}
+      {isPipelineRunning && (
+        <div className="pipeline-card mt-4">
+          <div className="pipeline-header">
+            <div>
+              <h3 className="text-lg font-bold">{STRINGS.installFlow.pipelineTitle}</h3>
+              <p className="text-sm text-muted mt-0.5">{pipelineStatus.message}</p>
+            </div>
+            <button
+              type="button"
+              className="btn btn-outline btn-sm"
+              onClick={handleCancelPipeline}
+              style={{ display: "inline-flex", gap: "0.4rem", alignItems: "center" }}
+            >
+              <XCircle size={14} className="text-danger" />
+              <span>{STRINGS.installFlow.cancelBtn}</span>
+            </button>
+          </div>
+
+          <div className="progress-track">
+            <div
+              className="progress-fill"
+              style={{ width: `${Math.min(100, Math.max(5, pipelineStatus.progress))}%` }}
+            />
+          </div>
+
+          <div className="pipeline-steps-list">
+            <div className="pipeline-step-row">
+              <div
+                className={`pipeline-step-icon ${
+                  pipelineStatus.progress >= 20 ? "completed" : "active"
+                }`}
+              >
+                {pipelineStatus.progress >= 20 ? <Check size={14} /> : "1"}
+              </div>
+              <span>Package Inspection & Metadata Extraction</span>
+            </div>
+
+            <div className="pipeline-step-row">
+              <div
+                className={`pipeline-step-icon ${
+                  pipelineStatus.progress >= 40
+                    ? "completed"
+                    : pipelineStatus.progress >= 20
+                    ? "active"
+                    : "pending"
+                }`}
+              >
+                {pipelineStatus.progress >= 40 ? <Check size={14} /> : "2"}
+              </div>
+              <span>Device USB Handshake & Developer Mode Verification</span>
+            </div>
+
+            <div className="pipeline-step-row">
+              <div
+                className={`pipeline-step-icon ${
+                  pipelineStatus.progress >= 60
+                    ? "completed"
+                    : pipelineStatus.progress >= 40
+                    ? "active"
+                    : "pending"
+                }`}
+              >
+                {pipelineStatus.progress >= 60 ? <Check size={14} /> : "3"}
+              </div>
+              <span>Developer Certificate & Provisioning Profile Issuance</span>
+            </div>
+
+            <div className="pipeline-step-row">
+              <div
+                className={`pipeline-step-icon ${
+                  pipelineStatus.progress >= 70
+                    ? "completed"
+                    : pipelineStatus.progress >= 60
+                    ? "active"
+                    : "pending"
+                }`}
+              >
+                {pipelineStatus.progress >= 70 ? <Check size={14} /> : "4"}
+              </div>
+              <span>Local Entitlement Sanitization & Code Re-signing</span>
+            </div>
+
+            <div className="pipeline-step-row">
+              <div
+                className={`pipeline-step-icon ${
+                  pipelineStatus.progress >= 100
+                    ? "completed"
+                    : pipelineStatus.progress >= 70
+                    ? "active"
+                    : "pending"
+                }`}
+              >
+                {pipelineStatus.progress >= 100 ? <Check size={14} /> : "5"}
+              </div>
+              <span>USB Installation & SpringBoard App Registration</span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Result: Success View */}
+      {pipelineResult && !isPipelineRunning && (
+        <div className="success-card mt-4">
+          <CheckCircle2 size={48} className="text-success mb-1" />
+          <h3 className="text-xl font-bold">{STRINGS.installFlow.successTitle}</h3>
+          <p className="text-sm text-muted">{STRINGS.installFlow.successSub}</p>
+
+          <div className="trust-guide-box">
+            <h4 className="trust-guide-title">
+              <ShieldCheck size={18} className="text-accent" />
+              <span>{STRINGS.installFlow.firstTimeTrustTitle}</span>
+            </h4>
+            <ol className="trust-steps-list">
+              <li>{STRINGS.installFlow.firstTimeTrustStep1}</li>
+              <li>{STRINGS.installFlow.firstTimeTrustStep2}</li>
+              <li>{STRINGS.installFlow.firstTimeTrustStep3}</li>
+              <li>{STRINGS.installFlow.firstTimeTrustStep4}</li>
+            </ol>
+            <div className="limits-item mt-3">
+              <Info size={14} className="text-accent shrink-0 mt-0.5" />
+              <span>{STRINGS.installFlow.devModeReminder}</span>
+            </div>
+          </div>
+
+          {pipelineResult.stripped_entitlements.length > 0 && (
+            <div className="stripped-entitlements-box text-left w-full max-w-xl">
+              <strong>{STRINGS.installFlow.entitlementsNoticeTitle}</strong>
+              <p className="mt-1">{STRINGS.installFlow.entitlementsNoticeDesc}</p>
+              <div className="mt-2">
+                {pipelineResult.stripped_entitlements.map((ent) => (
+                  <span key={ent} className="entitlement-pill">
+                    {ent}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div style={{ display: "flex", gap: "1rem", marginTop: "1rem" }}>
+            <button
+              type="button"
+              className="btn btn-outline btn-sm"
+              onClick={() => onNavigate("device-account")}
+            >
+              View Installed Apps
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              onClick={() => {
+                setMetadata(null);
+                setPipelineResult(null);
+              }}
+            >
+              {STRINGS.installFlow.installAnotherBtn}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Result: Pipeline Failure View */}
+      {pipelineError && !isPipelineRunning && (
+        <div className="inspection-error-card mt-4">
+          <div className="error-header-row">
+            <AlertTriangle size={28} className="text-danger shrink-0" />
+            <div>
+              <h3 className="error-card-title">Installation Failed</h3>
+              <span className="error-code-badge">Pipeline Error</span>
+            </div>
+          </div>
+
+          <div className="error-card-body">
+            <p className="error-message-text">{pipelineError}</p>
+          </div>
+
+          <div className="error-card-actions">
+            <button
+              type="button"
+              className="btn btn-outline btn-sm"
+              onClick={handleCopyDiagnostics}
+              style={{ display: "inline-flex", gap: "0.4rem", alignItems: "center" }}
+            >
+              {copiedDiagnostics ? <Check size={14} className="text-success" /> : <Copy size={14} />}
+              <span>
+                {copiedDiagnostics
+                  ? STRINGS.installFlow.diagnosticsCopied
+                  : STRINGS.installFlow.copyDiagnosticsBtn}
+              </span>
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              onClick={() => {
+                setPipelineError(null);
+                handleStartInstallation();
+              }}
+            >
+              Try Again
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Valid Inspection result: Preparation & Launch Step */}
+      {metadata && !isPipelineRunning && !pipelineResult && !pipelineError && (
         <div className="inspection-result-card mt-4">
           <div className="result-header">
             <div className="app-icon-container">
@@ -289,30 +645,145 @@ export const InstallIpaScreen: React.FC<InstallIpaScreenProps> = ({ onNavigate }
             </div>
           </div>
 
-          <div className="result-metadata-grid">
-            <div className="meta-item">
-              <span className="meta-label">File Path:</span>
-              <span className="meta-value font-mono text-xs">{metadata.file_path}</span>
+          {/* Device & Account Prerequisites Grid */}
+          <div className="install-prep-grid">
+            {/* Device Box */}
+            <div className="prep-card">
+              <div className="prep-card-title">
+                <Smartphone size={16} />
+                <span>{STRINGS.installFlow.deviceSectionTitle}</span>
+              </div>
+              <div className="prep-card-content">
+                {activeDevice ? (
+                  <div>
+                    <strong>{activeDevice.name}</strong> ({activeDevice.model})
+                    <div className="text-xs text-muted mt-1">iOS {activeDevice.ios_version}</div>
+                    <div className="mt-2">
+                      <span
+                        className={`status-pill ${
+                          activeDevice.is_trusted && !activeDevice.is_locked
+                            ? "pill-success"
+                            : "pill-warning"
+                        }`}
+                      >
+                        {activeDevice.is_locked
+                          ? "Passcode Locked"
+                          : activeDevice.is_trusted
+                          ? "Trusted"
+                          : "Untrusted"}
+                      </span>
+                      <span
+                        className={`status-pill ml-2 ${
+                          activeDevice.developer_mode_enabled ? "pill-success" : "pill-danger"
+                        }`}
+                        style={{ marginLeft: "0.5rem" }}
+                      >
+                        DevMode: {activeDevice.developer_mode_enabled ? "On" : "Off"}
+                      </span>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-danger text-sm">
+                    {STRINGS.installFlow.noDevicePrompt}
+                  </div>
+                )}
+              </div>
             </div>
-            <div className="meta-item">
-              <span className="meta-label">FairPlay DRM:</span>
-              <span className="meta-value text-success">None detected (`cryptid = 0`)</span>
+
+            {/* Apple ID Account Box */}
+            <div className="prep-card">
+              <div className="prep-card-title">
+                <User size={16} />
+                <span>{STRINGS.installFlow.accountSectionTitle}</span>
+              </div>
+              <div className="prep-card-content">
+                {appleSession ? (
+                  <div>
+                    <strong className="font-mono">{appleSession.apple_id}</strong>
+                    <div className="text-xs text-muted mt-1">
+                      Team: {appleSession.team_name}
+                    </div>
+                    <div className="mt-2">
+                      <span
+                        className={`tier-badge ${
+                          appleSession.account_type === "Paid" ? "paid" : "free"
+                        }`}
+                      >
+                        {appleSession.account_type} Tier
+                      </span>
+                    </div>
+                  </div>
+                ) : (
+                  <div>
+                    <p className="text-warning text-sm">
+                      {STRINGS.installFlow.noAccountPrompt}
+                    </p>
+                    <button
+                      type="button"
+                      className="btn btn-outline btn-sm mt-2"
+                      onClick={() => onNavigate("device-account")}
+                    >
+                      Sign In Now
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
 
-          <div className="result-card-footer">
-            <div className="step-indicator">
-              <span className="step-label">Step 2 Complete</span>
-              <span className="step-desc">Package inspected successfully</span>
+          {/* Entitlements Warning if Free Account */}
+          {appleSession?.account_type === "Free" && detectedStripped.length > 0 && (
+            <div className="stripped-entitlements-box">
+              <div style={{ display: "flex", gap: "0.5rem", alignItems: "flex-start" }}>
+                <ShieldAlert size={16} className="text-warning shrink-0 mt-0.5" />
+                <div>
+                  <strong>{STRINGS.installFlow.entitlementsNoticeTitle}</strong>
+                  <p className="mt-0.5">{STRINGS.installFlow.entitlementsNoticeDesc}</p>
+                  <div className="mt-2">
+                    {detectedStripped.map((ent) => (
+                      <span key={ent} className="entitlement-pill">
+                        {ent}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              </div>
             </div>
+          )}
+
+          {/* Optional Custom Bundle ID */}
+          <div className="form-group mt-3">
+            <label className="form-label" htmlFor="custom-bundle-id">
+              {STRINGS.installFlow.customBundleIdLabel}
+            </label>
+            <input
+              id="custom-bundle-id"
+              type="text"
+              className="form-input text-xs font-mono"
+              placeholder={metadata.bundle_id}
+              value={customBundleId}
+              onChange={(e) => setCustomBundleId(e.target.value)}
+            />
+          </div>
+
+          <div className="result-card-footer mt-4">
+            <div className="step-indicator">
+              <span className="step-label">{STRINGS.installFlow.readyToInstall}</span>
+              <span className="step-desc">
+                {activeDevice && appleSession
+                  ? "Device and signing identity ready"
+                  : "Resolve device or account requirements above"}
+              </span>
+            </div>
+
             <button
               type="button"
               className="btn btn-primary"
-              onClick={() => onNavigate("device-account")}
+              disabled={!activeDevice || !activeDevice.is_trusted || !appleSession}
+              onClick={handleStartInstallation}
               style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}
             >
-              <span>Next: Select Device & Account</span>
-              <ArrowRight size={16} />
+              <span>{STRINGS.installFlow.installBtn}</span>
             </button>
           </div>
         </div>
