@@ -1,7 +1,10 @@
 // Copyright (C) 2026 WinIPA Contributors
 // SPDX-License-Identifier: GPL-3.0-only
 
+pub mod diagnostics;
 pub mod redaction;
+
+pub use diagnostics::{export_diagnostics_to_file, generate_diagnostics_report};
 
 use crate::errors::WinIpaError;
 use keyring::Entry;

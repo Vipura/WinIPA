@@ -19,6 +19,7 @@ import {
   cancelInstallationPipeline,
   listenToPipelineStatus,
 } from "../api/pipeline";
+import { getRedactedDiagnostics } from "../api/diagnostics";
 import {
   ArrowLeft,
   UploadCloud,
@@ -172,19 +173,22 @@ export const InstallIpaScreen: React.FC<InstallIpaScreenProps> = ({ onNavigate }
     }
   };
 
-  const handleCopyDiagnostics = () => {
-    const diagnostics = `--- WinIPA Diagnostics ---
-Target UDID: ${selectedUdid}
-Apple ID: ${appleSession?.apple_id || "None"}
-Team ID: ${appleSession?.team_id || "None"}
-App Name: ${metadata?.app_name || "None"}
-Bundle ID: ${metadata?.bundle_id || "None"}
-Status Step: ${pipelineStatus.step}
-Status Message: ${pipelineStatus.message}
-Error: ${pipelineError || "None"}
-Time: ${new Date().toISOString()}`;
+  const handleCopyDiagnostics = async () => {
+    try {
+      const fullSystemReport = await getRedactedDiagnostics();
+      const diagnostics = `=== WINIPA PIPELINE ERROR DIAGNOSTICS ===
+Step: ${pipelineStatus.step}
+Message: ${pipelineStatus.message}
+Error: ${pipelineError || errorDetail?.message || "None"}
+App: ${metadata?.app_name || "None"} (${metadata?.bundle_id || "None"})
+Timestamp: ${new Date().toISOString()}
 
-    navigator.clipboard.writeText(diagnostics);
+${fullSystemReport}`;
+      await navigator.clipboard.writeText(diagnostics);
+    } catch {
+      const fallback = `Error: ${pipelineError || errorDetail?.message || "None"}\nStep: ${pipelineStatus.step}\nTime: ${new Date().toISOString()}`;
+      await navigator.clipboard.writeText(fallback);
+    }
     setCopiedDiagnostics(true);
     setTimeout(() => setCopiedDiagnostics(false), 2500);
   };

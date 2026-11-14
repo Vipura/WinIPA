@@ -123,6 +123,16 @@ fn remove_installed_app(bundle_id: String) -> Result<(), WinIpaError> {
     store_remove_app(&bundle_id)
 }
 
+#[tauri::command]
+async fn get_redacted_diagnostics() -> String {
+    store::generate_diagnostics_report().await
+}
+
+#[tauri::command]
+async fn export_diagnostics_to_file(destination: Option<String>) -> Result<String, WinIpaError> {
+    store::export_diagnostics_to_file(destination).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -146,7 +156,9 @@ pub fn run() {
             start_installation_pipeline,
             cancel_installation_pipeline,
             get_installed_apps,
-            remove_installed_app
+            remove_installed_app,
+            get_redacted_diagnostics,
+            export_diagnostics_to_file
         ])
         .run(tauri::generate_context!())
         .expect("error while running WinIPA application");

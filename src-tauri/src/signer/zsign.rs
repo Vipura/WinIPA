@@ -41,6 +41,14 @@ pub fn find_zsign_binary() -> Result<PathBuf, WinIpaError> {
             if candidate3.exists() {
                 return Ok(candidate3);
             }
+            let candidate4 = exe_dir.join("resources").join("bin").join("zsign.exe");
+            if candidate4.exists() {
+                return Ok(candidate4);
+            }
+            let candidate5 = exe_dir.join("resources").join("zsign.exe");
+            if candidate5.exists() {
+                return Ok(candidate5);
+            }
         }
     }
 
