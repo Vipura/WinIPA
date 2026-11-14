@@ -62,6 +62,35 @@ fn der_bit_string(data: &[u8]) -> Vec<u8> {
     der_tag_and_len(0x03, &content)
 }
 
+/// Wraps an XML plist in a standard DER-encoded CMS (RFC 5652 ContentInfo / SignedData)
+/// envelope so that OpenSSL and zsign can parse it as a valid `.mobileprovision` file.
+pub fn wrap_in_cms_content_info(xml_bytes: &[u8]) -> Vec<u8> {
+    // id-data OID: 1.2.840.113549.1.7.1
+    let id_data_oid = [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x07, 0x01];
+    let octet_str = der_tag_and_len(0x04, xml_bytes);
+    let e_content = der_tag_and_len(0xA0, &octet_str);
+    let encap_content_info = der_sequence(&[der_oid(&id_data_oid), e_content].concat());
+
+    // SignedData: version(1), digestAlgorithms (empty set), encapContentInfo, signerInfos (empty set)
+    let version = [0x02, 0x01, 0x01];
+    let empty_set = [0x31, 0x00];
+    let signed_data = der_sequence(
+        &[
+            version.to_vec(),
+            empty_set.to_vec(),
+            encap_content_info,
+            empty_set.to_vec(),
+        ]
+        .concat(),
+    );
+
+    // id-signedData OID: 1.2.840.113549.1.7.2
+    let id_signed_data_oid = [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x07, 0x02];
+    let content = der_tag_and_len(0xA0, &signed_data);
+
+    der_sequence(&[der_oid(&id_signed_data_oid), content].concat())
+}
+
 /// Builds an X.509 Name structure (e.g. CN=<common_name>, OU=<team_id>).
 fn build_subject_name(common_name: &str, team_id: &str) -> Vec<u8> {
     // 2.5.4.3 = id-at-commonName (OID: 55 04 03)

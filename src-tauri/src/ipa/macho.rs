@@ -290,6 +290,71 @@ pub fn create_test_macho(encrypted: bool, signed: bool) -> Vec<u8> {
     bytes
 }
 
+/// Constructs a synthetic valid Mach-O 64-bit executable with __TEXT, __LINKEDIT,
+/// and LC_CODE_SIGNATURE segments that can be accepted and signed by code signing tools.
+pub fn create_signable_test_macho() -> Vec<u8> {
+    let mut bytes = vec![0u8; 0x8000]; // 32KB
+
+    // Header
+    bytes[0..4].copy_from_slice(&MH_MAGIC_64.to_le_bytes()); // magic 0xfeedfacf
+    bytes[4..8].copy_from_slice(&0x0100000cu32.to_le_bytes()); // cputype = arm64
+    bytes[8..12].copy_from_slice(&0u32.to_le_bytes()); // cpusubtype = 0
+    bytes[12..16].copy_from_slice(&2u32.to_le_bytes()); // filetype = MH_EXECUTE
+    bytes[16..20].copy_from_slice(&4u32.to_le_bytes()); // ncmds = 4
+    bytes[20..24].copy_from_slice(&232u32.to_le_bytes()); // sizeofcmds = 72*3 + 16 = 232
+    bytes[24..28].copy_from_slice(&0x00200085u32.to_le_bytes()); // flags
+    bytes[28..32].copy_from_slice(&0u32.to_le_bytes()); // reserved
+
+    // LC_SEGMENT_64: __PAGEZERO (72 bytes)
+    let off1 = 32;
+    bytes[off1..off1 + 4].copy_from_slice(&0x19u32.to_le_bytes()); // LC_SEGMENT_64
+    bytes[off1 + 4..off1 + 8].copy_from_slice(&72u32.to_le_bytes());
+    let mut segname_pz = [0u8; 16];
+    segname_pz[..10].copy_from_slice(b"__PAGEZERO");
+    bytes[off1 + 8..off1 + 24].copy_from_slice(&segname_pz);
+    bytes[off1 + 24..off1 + 32].copy_from_slice(&0u64.to_le_bytes()); // vmaddr
+    bytes[off1 + 32..off1 + 40].copy_from_slice(&0x100000000u64.to_le_bytes()); // vmsize
+    bytes[off1 + 40..off1 + 48].copy_from_slice(&0u64.to_le_bytes()); // fileoff
+    bytes[off1 + 48..off1 + 56].copy_from_slice(&0u64.to_le_bytes()); // filesize
+
+    // LC_SEGMENT_64: __TEXT (72 bytes)
+    let off2 = 104;
+    bytes[off2..off2 + 4].copy_from_slice(&0x19u32.to_le_bytes());
+    bytes[off2 + 4..off2 + 8].copy_from_slice(&72u32.to_le_bytes());
+    let mut segname_text = [0u8; 16];
+    segname_text[..6].copy_from_slice(b"__TEXT");
+    bytes[off2 + 8..off2 + 24].copy_from_slice(&segname_text);
+    bytes[off2 + 24..off2 + 32].copy_from_slice(&0x100000000u64.to_le_bytes()); // vmaddr
+    bytes[off2 + 32..off2 + 40].copy_from_slice(&0x4000u64.to_le_bytes()); // vmsize
+    bytes[off2 + 40..off2 + 48].copy_from_slice(&0u64.to_le_bytes()); // fileoff
+    bytes[off2 + 48..off2 + 56].copy_from_slice(&0x4000u64.to_le_bytes()); // filesize
+    bytes[off2 + 56..off2 + 60].copy_from_slice(&7u32.to_le_bytes()); // maxprot = rwx
+    bytes[off2 + 60..off2 + 64].copy_from_slice(&5u32.to_le_bytes()); // initprot = r-x
+
+    // LC_SEGMENT_64: __LINKEDIT (72 bytes)
+    let off3 = 176;
+    bytes[off3..off3 + 4].copy_from_slice(&0x19u32.to_le_bytes());
+    bytes[off3 + 4..off3 + 8].copy_from_slice(&72u32.to_le_bytes());
+    let mut segname_le = [0u8; 16];
+    segname_le[..10].copy_from_slice(b"__LINKEDIT");
+    bytes[off3 + 8..off3 + 24].copy_from_slice(&segname_le);
+    bytes[off3 + 24..off3 + 32].copy_from_slice(&0x100004000u64.to_le_bytes()); // vmaddr
+    bytes[off3 + 32..off3 + 40].copy_from_slice(&0x4000u64.to_le_bytes()); // vmsize
+    bytes[off3 + 40..off3 + 48].copy_from_slice(&0x4000u64.to_le_bytes()); // fileoff
+    bytes[off3 + 48..off3 + 56].copy_from_slice(&0x4000u64.to_le_bytes()); // filesize
+    bytes[off3 + 56..off3 + 60].copy_from_slice(&7u32.to_le_bytes()); // maxprot
+    bytes[off3 + 60..off3 + 64].copy_from_slice(&1u32.to_le_bytes()); // initprot = r--
+
+    // LC_CODE_SIGNATURE (16 bytes)
+    let off4 = 248;
+    bytes[off4..off4 + 4].copy_from_slice(&LC_CODE_SIGNATURE.to_le_bytes()); // 0x1d
+    bytes[off4 + 4..off4 + 8].copy_from_slice(&16u32.to_le_bytes());
+    bytes[off4 + 8..off4 + 12].copy_from_slice(&0x4000u32.to_le_bytes()); // dataoff in file
+    bytes[off4 + 12..off4 + 16].copy_from_slice(&0x1000u32.to_le_bytes()); // datasize
+
+    bytes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
