@@ -23,6 +23,8 @@ Below is a list of the third-party open-source components, crates, and libraries
 | `regex` | Diagnostic log sanitization and redaction | MIT OR Apache-2.0 | https://github.com/rust-lang/regex |
 | `tracing`, `tracing-subscriber` | Structured logging | MIT | https://github.com/tokio-rs/tracing |
 | `idevice` | Pure-Rust usbmuxd and lockdown client for iOS | MIT | https://github.com/jkcoxson/idevice |
+| `rsa` | RSA key generation and PKCS#10 CSR formatting | MIT OR Apache-2.0 | https://github.com/RustCrypto/RSA |
+| `yasna` | ASN.1 DER encoding and CMS ContentInfo encapsulation | MIT | https://github.com/vendethiel/yasna.rs |
 
 ---
 
