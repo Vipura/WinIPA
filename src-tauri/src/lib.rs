@@ -12,6 +12,8 @@ pub mod store;
 
 use device::{check_driver, list_devices, start_device_monitor, DeviceDriverStatus, DeviceInfo};
 use errors::WinIpaError;
+use ipa::IpaMetadata;
+use std::path::Path;
 
 #[tauri::command]
 fn get_app_version() -> &'static str {
@@ -33,6 +35,16 @@ async fn refresh_devices() -> Result<Vec<DeviceInfo>, WinIpaError> {
     list_devices().await
 }
 
+#[tauri::command]
+async fn inspect_ipa_package(path: String) -> Result<IpaMetadata, WinIpaError> {
+    tokio::task::spawn_blocking(move || ipa::inspect_ipa(Path::new(&path)))
+        .await
+        .map_err(|e| WinIpaError::Unknown {
+            message: format!("Inspection task panicked or was cancelled: {e}"),
+            diagnostics: None,
+        })?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -46,7 +58,8 @@ pub fn run() {
             get_app_version,
             get_driver_status,
             get_connected_devices,
-            refresh_devices
+            refresh_devices,
+            inspect_ipa_package
         ])
         .run(tauri::generate_context!())
         .expect("error while running WinIPA application");
