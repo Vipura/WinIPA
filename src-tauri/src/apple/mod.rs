@@ -32,7 +32,10 @@ pub struct AppleSessionInfo {
 pub type SharedAppleService = Arc<Mutex<Box<dyn AppleService>>>;
 
 pub fn create_default_apple_service() -> SharedAppleService {
-    Arc::new(Mutex::new(Box::new(AppleDeveloperClient::new(None))))
+    let custom_url = crate::store::get_secret("custom_anisette_url")
+        .ok()
+        .flatten();
+    Arc::new(Mutex::new(Box::new(AppleDeveloperClient::new(custom_url))))
 }
 
 /// Helper to get or initialize the global shared AppleService.

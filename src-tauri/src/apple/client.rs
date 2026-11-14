@@ -178,19 +178,32 @@ impl AppleDeveloperClient {
             HeaderValue::from_static("com.apple.gs.xcode.auth"),
         );
 
-        if let Ok(ani) = self.anisette.get_headers().await {
-            let set_header = |headers: &mut HeaderMap, name: &'static str, val: &str| {
-                if let Ok(hval) = HeaderValue::from_str(val) {
-                    headers.insert(HeaderName::from_static(name), hval);
-                }
-            };
+        let ani = self.anisette.get_headers().await?;
 
-            set_header(&mut headers, "x-apple-i-md", &ani.x_apple_i_md);
-            set_header(&mut headers, "x-apple-i-md-m", &ani.x_apple_i_md_m);
-            set_header(&mut headers, "x-apple-i-md-rinfo", &ani.x_apple_i_md_rinfo);
-            set_header(&mut headers, "x-apple-i-md-lu", &ani.x_apple_i_md_lu);
-            set_header(&mut headers, "x-mme-device-id", &ani.x_mme_device_id);
-            set_header(&mut headers, "x-mme-client-info", &ani.x_mme_client_info);
+        let set_header = |headers: &mut HeaderMap, name: &'static str, val: &str| {
+            if let Ok(hval) = HeaderValue::from_str(val) {
+                headers.insert(HeaderName::from_static(name), hval);
+            }
+        };
+
+        set_header(&mut headers, "x-apple-i-md", &ani.x_apple_i_md);
+        set_header(&mut headers, "x-apple-i-md-m", &ani.x_apple_i_md_m);
+        set_header(&mut headers, "x-apple-i-md-rinfo", &ani.x_apple_i_md_rinfo);
+        set_header(&mut headers, "x-apple-i-md-lu", &ani.x_apple_i_md_lu);
+        set_header(&mut headers, "x-mme-device-id", &ani.x_mme_device_id);
+        set_header(&mut headers, "x-mme-client-info", &ani.x_mme_client_info);
+
+        if let Some(ref ct) = ani.x_apple_i_client_time {
+            set_header(&mut headers, "x-apple-i-client-time", ct);
+        }
+        if let Some(ref tz) = ani.x_apple_i_time_zone {
+            set_header(&mut headers, "x-apple-i-time-zone", tz);
+        }
+        if let Some(ref loc) = ani.x_apple_locale {
+            set_header(&mut headers, "x-apple-locale", loc);
+        }
+        if let Some(ref srl) = ani.x_apple_i_srl_no {
+            set_header(&mut headers, "x-apple-i-srl-no", srl);
         }
 
         Ok(headers)
@@ -252,6 +265,15 @@ impl AppleDeveloperClient {
             set_header(&mut hmap, "x-apple-i-md-lu", &ani.x_apple_i_md_lu);
             set_header(&mut hmap, "x-mme-device-id", &ani.x_mme_device_id);
             set_header(&mut hmap, "x-mme-client-info", &ani.x_mme_client_info);
+            if let Some(ref ct) = ani.x_apple_i_client_time {
+                set_header(&mut hmap, "x-apple-i-client-time", ct);
+            }
+            if let Some(ref tz) = ani.x_apple_i_time_zone {
+                set_header(&mut hmap, "x-apple-i-time-zone", tz);
+            }
+            if let Some(ref loc) = ani.x_apple_locale {
+                set_header(&mut hmap, "x-apple-locale", loc);
+            }
             req = req.headers(hmap);
         }
 
@@ -420,15 +442,26 @@ impl AppleService for AppleDeveloperClient {
 
         if !status.is_success() {
             let err_body = resp.text().await.unwrap_or_default();
-            return Err(WinIpaError::AppleAuthFailed(format!(
-                "Apple sign-in failed (HTTP {}): {}",
-                status.as_u16(),
-                if err_body.is_empty() {
-                    "Please check your credentials or network connection."
-                } else {
-                    &err_body
-                }
-            )));
+            let clean_msg = if status.as_u16() == 503 {
+                "Apple authentication servers are temporarily unavailable or rate-limiting requests. Please wait a few moments and try again.".to_string()
+            } else if err_body.contains("<html") || err_body.contains("<HTML") {
+                format!(
+                    "Apple sign-in failed (HTTP {}). Please check your internet connection or try again later.",
+                    status.as_u16()
+                )
+            } else if !err_body.is_empty() {
+                format!(
+                    "Apple sign-in failed (HTTP {}): {}",
+                    status.as_u16(),
+                    err_body
+                )
+            } else {
+                format!(
+                    "Apple sign-in failed (HTTP {}). Please check your credentials or network connection.",
+                    status.as_u16()
+                )
+            };
+            return Err(WinIpaError::AppleAuthFailed(clean_msg));
         }
 
         // Direct success without 2FA
