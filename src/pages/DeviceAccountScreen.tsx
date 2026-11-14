@@ -18,6 +18,7 @@ import {
   appleLogout,
 } from "../api/apple";
 import { getInstalledApps, removeInstalledApp } from "../api/pipeline";
+import { getRedactedDiagnostics, exportDiagnosticsToFile } from "../api/diagnostics";
 import {
   Smartphone,
   User,
@@ -36,6 +37,8 @@ import {
   CheckCircle2,
   Info,
   Trash2,
+  Download,
+  PlusCircle,
 } from "lucide-react";
 
 interface DeviceAccountScreenProps {
@@ -48,6 +51,8 @@ export const DeviceAccountScreen: React.FC<DeviceAccountScreenProps> = ({ onNavi
   const [appleSession, setAppleSession] = useState<AppleSessionInfo | null>(null);
   const [installedApps, setInstalledApps] = useState<InstalledAppRecord[]>([]);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
+  const [isExportingDiagnostics, setIsExportingDiagnostics] = useState<boolean>(false);
+  const [diagnosticsExportMsg, setDiagnosticsExportMsg] = useState<string | null>(null);
 
   // Auth Modal State
   const [isAuthModalOpen, setIsAuthModalOpen] = useState<boolean>(false);
@@ -213,6 +218,24 @@ export const DeviceAccountScreen: React.FC<DeviceAccountScreenProps> = ({ onNavi
     }
   };
 
+  const handleExportDiagnostics = async () => {
+    setIsExportingDiagnostics(true);
+    setDiagnosticsExportMsg(null);
+    try {
+      const savedPath = await exportDiagnosticsToFile();
+      const report = await getRedactedDiagnostics();
+      await navigator.clipboard.writeText(report);
+      setDiagnosticsExportMsg(`Diagnostics saved to: ${savedPath} (and copied to clipboard)`);
+      setTimeout(() => setDiagnosticsExportMsg(null), 8000);
+    } catch (err) {
+      console.error("Failed to export diagnostics:", err);
+      setDiagnosticsExportMsg("Failed to export diagnostics");
+      setTimeout(() => setDiagnosticsExportMsg(null), 4000);
+    } finally {
+      setIsExportingDiagnostics(false);
+    }
+  };
+
   const activeDevice = devices.length > 0 ? devices[0] : null;
 
   // Calculate certificate days remaining
@@ -241,17 +264,53 @@ export const DeviceAccountScreen: React.FC<DeviceAccountScreenProps> = ({ onNavi
           <h2 className="page-title">{STRINGS.device.title}</h2>
         </div>
 
-        <button
-          type="button"
-          className="btn btn-outline btn-sm"
-          onClick={handleRefresh}
-          disabled={isRefreshing}
-          style={{ display: "flex", gap: "0.4rem", alignItems: "center" }}
-        >
-          <RefreshCw size={14} className={isRefreshing ? "spin-icon" : ""} />
-          <span>{isRefreshing ? STRINGS.device.refreshing : STRINGS.device.refreshBtn}</span>
-        </button>
+        <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+          <button
+            type="button"
+            className="btn btn-outline btn-sm"
+            onClick={handleExportDiagnostics}
+            disabled={isExportingDiagnostics}
+            title="Export redacted diagnostics report to file and clipboard"
+            style={{ display: "flex", gap: "0.4rem", alignItems: "center" }}
+          >
+            {isExportingDiagnostics ? (
+              <RefreshCw size={14} className="spin-icon" />
+            ) : (
+              <Download size={14} />
+            )}
+            <span>Export Diagnostics</span>
+          </button>
+
+          <button
+            type="button"
+            className="btn btn-outline btn-sm"
+            onClick={handleRefresh}
+            disabled={isRefreshing}
+            style={{ display: "flex", gap: "0.4rem", alignItems: "center" }}
+          >
+            <RefreshCw size={14} className={isRefreshing ? "spin-icon" : ""} />
+            <span>{isRefreshing ? STRINGS.device.refreshing : STRINGS.device.refreshBtn}</span>
+          </button>
+        </div>
       </div>
+
+      {/* Diagnostics Export Notification */}
+      {diagnosticsExportMsg && (
+        <div
+          className="status-notice notice-info mb-4"
+          style={{
+            backgroundColor: "var(--accent-light)",
+            border: "1px solid var(--accent)",
+            color: "var(--text-main)",
+            display: "flex",
+            alignItems: "center",
+            gap: "0.6rem",
+          }}
+        >
+          <CheckCircle2 size={16} className="text-accent shrink-0" />
+          <span style={{ fontSize: "0.85rem" }}>{diagnosticsExportMsg}</span>
+        </div>
+      )}
 
       {/* Driver Warning Banner if Missing or Stopped */}
       {driverStatus && !driverStatus.is_installed && (
@@ -498,7 +557,18 @@ export const DeviceAccountScreen: React.FC<DeviceAccountScreenProps> = ({ onNavi
       <section className="info-card full-width mt-4">
         <h3 className="section-title mb-3">{STRINGS.device.appsSection}</h3>
         {installedApps.length === 0 ? (
-          <p className="empty-msg text-center">{STRINGS.device.noApps}</p>
+          <div className="empty-state">
+            <p className="empty-msg text-center mb-3">{STRINGS.device.noApps}</p>
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              onClick={() => onNavigate("install")}
+              style={{ display: "inline-flex", gap: "0.4rem", alignItems: "center" }}
+            >
+              <PlusCircle size={14} />
+              <span>Install New IPA</span>
+            </button>
+          </div>
         ) : (
           <div style={{ overflowX: "auto" }}>
             <table className="installed-apps-table">
@@ -527,13 +597,14 @@ export const DeviceAccountScreen: React.FC<DeviceAccountScreenProps> = ({ onNavi
                       <td>{new Date(app.installed_at * 1000).toLocaleDateString()}</td>
                       <td>
                         {days !== null ? (
-                          days > 0 ? (
-                            <span
-                              className={`cert-expiry-pill ${
-                                days > 2 ? "valid" : "expiring-soon"
-                              }`}
-                            >
+                          days > 2 ? (
+                            <span className="cert-expiry-pill valid">
                               <Calendar size={12} style={{ display: "inline", marginRight: "4px" }} />
+                              {days} days left
+                            </span>
+                          ) : days > 0 ? (
+                            <span className="cert-expiry-pill expiring-soon">
+                              <AlertTriangle size={12} style={{ display: "inline", marginRight: "4px" }} />
                               {days} {days === 1 ? "day" : "days"} left
                             </span>
                           ) : (
@@ -544,15 +615,29 @@ export const DeviceAccountScreen: React.FC<DeviceAccountScreenProps> = ({ onNavi
                         )}
                       </td>
                       <td style={{ textAlign: "right" }}>
-                        <button
-                          type="button"
-                          className="btn btn-outline btn-sm text-danger"
-                          onClick={() => handleRemoveApp(app.bundle_id)}
-                          title="Remove from history"
-                          style={{ padding: "0.25rem 0.5rem" }}
-                        >
-                          <Trash2 size={14} />
-                        </button>
+                        <div style={{ display: "inline-flex", gap: "0.4rem" }}>
+                          {days !== null && days <= 2 && (
+                            <button
+                              type="button"
+                              className="btn btn-outline btn-sm text-accent"
+                              onClick={() => onNavigate("install")}
+                              title="Re-sign and install"
+                              style={{ padding: "0.25rem 0.5rem", fontSize: "0.75rem" }}
+                            >
+                              <RefreshCw size={12} style={{ marginRight: "3px" }} />
+                              Re-sign
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            className="btn btn-outline btn-sm text-danger"
+                            onClick={() => handleRemoveApp(app.bundle_id)}
+                            title="Remove from history"
+                            style={{ padding: "0.25rem 0.5rem" }}
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   );
