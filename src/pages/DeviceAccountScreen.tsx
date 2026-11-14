@@ -712,9 +712,40 @@ export const DeviceAccountScreen: React.FC<DeviceAccountScreenProps> = ({
                   </div>
 
                   {authError && (
-                    <div className="status-notice notice-danger">
-                      <AlertTriangle size={16} className="shrink-0" />
-                      <span>{authError}</span>
+                    <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+                      <div className="status-notice notice-danger">
+                        <AlertTriangle size={16} className="shrink-0" />
+                        <span>{authError}</span>
+                      </div>
+                      {(authError.toLowerCase().includes("rate-limiting") ||
+                        authError.toLowerCase().includes("temporarily unavailable") ||
+                        authError.includes("503") ||
+                        authError.toLowerCase().includes("too many")) && (
+                        <div
+                          className="status-notice notice-info"
+                          style={{
+                            fontSize: "0.82rem",
+                            lineHeight: "1.4",
+                            background: "var(--color-bg-secondary, #f8fafc)",
+                            border: "1px solid var(--color-border, #e2e8f0)",
+                            borderRadius: "6px",
+                            padding: "0.6rem 0.75rem",
+                          }}
+                        >
+                          <Info size={16} className="shrink-0 text-accent" style={{ marginTop: "2px" }} />
+                          <div>
+                            <strong>Cooldown / Rate-Limit Active:</strong> Apple temporarily throttles sign-ins from your network IP after repeated attempts.
+                            <ul style={{ margin: "0.35rem 0 0 1.1rem", padding: 0 }}>
+                              <li>
+                                <strong>Instant Fix:</strong> Connect your PC to a <strong>mobile hotspot</strong> (from your phone) to get a fresh IP address and sign in immediately.
+                              </li>
+                              <li>
+                                <strong>Wait it out:</strong> Wait 15–30 minutes without attempting to sign in so Apple&apos;s cooldown window can expire.
+                              </li>
+                            </ul>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
 
@@ -784,9 +815,40 @@ export const DeviceAccountScreen: React.FC<DeviceAccountScreenProps> = ({
                   </p>
 
                   {authError && (
-                    <div className="status-notice notice-danger">
-                      <AlertTriangle size={16} className="shrink-0" />
-                      <span>{authError}</span>
+                    <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+                      <div className="status-notice notice-danger">
+                        <AlertTriangle size={16} className="shrink-0" />
+                        <span>{authError}</span>
+                      </div>
+                      {(authError.toLowerCase().includes("rate-limiting") ||
+                        authError.toLowerCase().includes("temporarily unavailable") ||
+                        authError.includes("503") ||
+                        authError.toLowerCase().includes("too many")) && (
+                        <div
+                          className="status-notice notice-info"
+                          style={{
+                            fontSize: "0.82rem",
+                            lineHeight: "1.4",
+                            background: "var(--color-bg-secondary, #f8fafc)",
+                            border: "1px solid var(--color-border, #e2e8f0)",
+                            borderRadius: "6px",
+                            padding: "0.6rem 0.75rem",
+                          }}
+                        >
+                          <Info size={16} className="shrink-0 text-accent" style={{ marginTop: "2px" }} />
+                          <div>
+                            <strong>Cooldown / Rate-Limit Active:</strong> Apple temporarily throttles sign-ins from your network IP after repeated attempts.
+                            <ul style={{ margin: "0.35rem 0 0 1.1rem", padding: 0 }}>
+                              <li>
+                                <strong>Instant Fix:</strong> Connect your PC to a <strong>mobile hotspot</strong> (from your phone) to get a fresh IP address and sign in immediately.
+                              </li>
+                              <li>
+                                <strong>Wait it out:</strong> Wait 15–30 minutes without attempting to sign in so Apple&apos;s cooldown window can expire.
+                              </li>
+                            </ul>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
 
