@@ -1,6 +1,6 @@
 [package]
 name = "winipa"
-version = "0.1.4"
+version = "0.1.5"
 description = "Test iOS apps on iPhone from Windows without a Mac"
 authors = ["WinIPA Contributors"]
 edition = "2021"
@@ -33,6 +33,8 @@ rand = "0.8"
 sha2 = { version = "0.10", features = ["oid"] }
 async-trait = "0.1"
 rfd = "0.15"
+flate2 = "1.1.11"
+crc32fast = "1.5.5"
 
 [dev-dependencies]
 tokio = { version = "1.43", features = ["full"] }

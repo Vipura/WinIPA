@@ -56,6 +56,7 @@ export const InstallIpaScreen: React.FC<InstallIpaScreenProps> = ({
   const [isDragging, setIsDragging] = useState<boolean>(false);
   const [isInspecting, setIsInspecting] = useState<boolean>(false);
   const [metadata, setMetadata] = useState<IpaMetadata | null>(null);
+  const [iconError, setIconError] = useState<boolean>(false);
   const [errorDetail, setErrorDetail] = useState<ErrorDetail | null>(null);
   const [manualPath, setManualPath] = useState<string>("");
 
@@ -157,6 +158,7 @@ export const InstallIpaScreen: React.FC<InstallIpaScreenProps> = ({
     setIsInspecting(true);
     setErrorDetail(null);
     setMetadata(null);
+    setIconError(false);
     setPipelineResult(null);
     setPipelineError(null);
 
@@ -670,11 +672,12 @@ ${fullSystemReport}`;
         <div className="inspection-result-card mt-4">
           <div className="result-header">
             <div className="app-icon-container">
-              {metadata.icon_base64 ? (
+              {metadata.icon_base64 && !iconError ? (
                 <img
                   src={metadata.icon_base64}
                   alt={metadata.app_name}
                   className="app-icon-img"
+                  onError={() => setIconError(true)}
                 />
               ) : (
                 <div className="app-icon-placeholder">

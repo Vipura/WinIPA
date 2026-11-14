@@ -175,14 +175,18 @@ export const DeviceAccountScreen: React.FC<DeviceAccountScreenProps> = ({
     setAuthError(null);
 
     try {
-      const res = await appleLogin(email.trim(), password);
-      if (res.type === "Success") {
-        setAppleSession(res.data);
-        onSessionChange?.(res.data);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const res: any = await appleLogin(email.trim(), password);
+      if (res?.type === "Success" || res?.Success) {
+        const sessionData = res.type === "Success" ? res.data : res.Success;
+        setAppleSession(sessionData);
+        onSessionChange?.(sessionData);
         setIsAuthModalOpen(false);
         setPassword("");
-      } else if (res.type === "TwoFactorRequired") {
+      } else if (res?.type === "TwoFactorRequired" || res?.TwoFactorRequired) {
         setAuthStep("2fa");
+      } else {
+        setAuthError("Unexpected login response from Apple. Please try again.");
       }
     } catch (err: unknown) {
       const msg = typeof err === "string" ? err : (err as Error)?.message || "Failed to sign in to Apple ID";

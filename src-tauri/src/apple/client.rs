@@ -418,6 +418,19 @@ impl AppleService for AppleDeveloperClient {
             });
         }
 
+        if !status.is_success() {
+            let err_body = resp.text().await.unwrap_or_default();
+            return Err(WinIpaError::AppleAuthFailed(format!(
+                "Apple sign-in failed (HTTP {}): {}",
+                status.as_u16(),
+                if err_body.is_empty() {
+                    "Please check your credentials or network connection."
+                } else {
+                    &err_body
+                }
+            )));
+        }
+
         // Direct success without 2FA
         let token_opt = extract_apple_session_token(&resp_headers, None)
             .or_else(|| self.extract_myacinfo_from_jar());
