@@ -120,7 +120,7 @@ pub async fn list_devices() -> Result<Vec<DeviceInfo>, WinIpaError> {
 pub fn start_device_monitor(app_handle: AppHandle) {
     let cache: DeviceCache = Arc::new(Mutex::new(HashMap::new()));
 
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         loop {
             // Check driver status periodically
             let driver_status = check_driver().await;
