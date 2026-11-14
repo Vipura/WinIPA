@@ -519,24 +519,9 @@ impl AppleService for AppleDeveloperClient {
                 }
             }
 
-            let session_info =
-                if let Ok(Some(info_json)) = get_secret(&format!("info:{apple_id}")) {
-                    serde_json::from_str::<AppleSessionInfo>(&info_json).unwrap_or_else(|_| {
-                        AppleSessionInfo {
-                            apple_id: apple_id.clone(),
-                            team_id: "PERSONAL".to_string(),
-                            team_name: format!("{apple_id} (Personal Team)"),
-                            account_type: AppleAccountType::Free,
-                            cert_expires_at: Some(
-                                std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_secs()
-                                    + 7 * 86400,
-                            ),
-                        }
-                    })
-                } else {
+            let session_info = if let Ok(Some(info_json)) = get_secret(&format!("info:{apple_id}"))
+            {
+                serde_json::from_str::<AppleSessionInfo>(&info_json).unwrap_or_else(|_| {
                     AppleSessionInfo {
                         apple_id: apple_id.clone(),
                         team_id: "PERSONAL".to_string(),
@@ -550,7 +535,22 @@ impl AppleService for AppleDeveloperClient {
                                 + 7 * 86400,
                         ),
                     }
-                };
+                })
+            } else {
+                AppleSessionInfo {
+                    apple_id: apple_id.clone(),
+                    team_id: "PERSONAL".to_string(),
+                    team_name: format!("{apple_id} (Personal Team)"),
+                    account_type: AppleAccountType::Free,
+                    cert_expires_at: Some(
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs()
+                            + 7 * 86400,
+                    ),
+                }
+            };
 
             if let Ok(mut guard) = self.session.lock() {
                 *guard = Some(session_info.clone());
