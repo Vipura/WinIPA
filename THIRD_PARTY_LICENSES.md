@@ -25,6 +25,7 @@ Below is a list of the third-party open-source components, crates, and libraries
 | `idevice` | Pure-Rust usbmuxd and lockdown client for iOS | MIT | https://github.com/jkcoxson/idevice |
 | `rsa` | RSA key generation and PKCS#10 CSR formatting | MIT OR Apache-2.0 | https://github.com/RustCrypto/RSA |
 | `yasna` | ASN.1 DER encoding and CMS ContentInfo encapsulation | MIT | https://github.com/vendethiel/yasna.rs |
+| `rfd` | Native file dialogs for Windows | MIT OR Apache-2.0 | https://github.com/PolyMeilex/rfd |
 
 ---
 

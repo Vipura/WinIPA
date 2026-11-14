@@ -7,3 +7,7 @@ import { IpaMetadata } from "../types";
 export async function inspectIpaPackage(path: string): Promise<IpaMetadata> {
   return await invoke<IpaMetadata>("inspect_ipa_package", { path });
 }
+
+export async function pickIpaFile(): Promise<string | null> {
+  return await invoke<string | null>("pick_ipa_file");
+}

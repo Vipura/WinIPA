@@ -50,6 +50,17 @@ async fn inspect_ipa_package(path: String) -> Result<IpaMetadata, WinIpaError> {
 }
 
 #[tauri::command]
+async fn pick_ipa_file() -> Result<Option<String>, WinIpaError> {
+    let file = rfd::AsyncFileDialog::new()
+        .add_filter("iOS Application Archive (*.ipa)", &["ipa"])
+        .set_title("Select iOS Application (.ipa)")
+        .pick_file()
+        .await;
+
+    Ok(file.map(|f| f.path().to_string_lossy().to_string()))
+}
+
+#[tauri::command]
 async fn apple_login(apple_id: String, password: String) -> Result<LoginResult, WinIpaError> {
     let service = get_apple_service();
     let mut lock = service.lock().await;
@@ -148,6 +159,7 @@ pub fn run() {
             get_connected_devices,
             refresh_devices,
             inspect_ipa_package,
+            pick_ipa_file,
             apple_login,
             apple_submit_2fa,
             apple_get_session,

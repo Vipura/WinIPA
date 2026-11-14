@@ -1,7 +1,7 @@
 // Copyright (C) 2026 WinIPA Contributors
 // SPDX-License-Identifier: GPL-3.0-only
 
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { STRINGS } from "../strings";
 import {
   IpaMetadata,
@@ -11,7 +11,8 @@ import {
   PipelineStatus,
   PipelineResult,
 } from "../types";
-import { inspectIpaPackage } from "../api/ipa";
+import { inspectIpaPackage, pickIpaFile } from "../api/ipa";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { getConnectedDevices } from "../api/device";
 import { appleGetSession } from "../api/apple";
 import {
@@ -48,7 +49,6 @@ export const InstallIpaScreen: React.FC<InstallIpaScreenProps> = ({ onNavigate }
   const [metadata, setMetadata] = useState<IpaMetadata | null>(null);
   const [errorDetail, setErrorDetail] = useState<ErrorDetail | null>(null);
   const [manualPath, setManualPath] = useState<string>("");
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Device & Account prerequisites
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
@@ -66,6 +66,7 @@ export const InstallIpaScreen: React.FC<InstallIpaScreenProps> = ({ onNavigate }
   const [pipelineResult, setPipelineResult] = useState<PipelineResult | null>(null);
   const [pipelineError, setPipelineError] = useState<string | null>(null);
   const [copiedDiagnostics, setCopiedDiagnostics] = useState<boolean>(false);
+  const [manualDevModeConfirmed, setManualDevModeConfirmed] = useState<boolean>(false);
 
   // Load prerequisites on mount
   const refreshPrerequisites = useCallback(async () => {
@@ -94,6 +95,30 @@ export const InstallIpaScreen: React.FC<InstallIpaScreenProps> = ({ onNavigate }
     }).then((unsub) => {
       unlisten = unsub;
     });
+
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    getCurrentWebviewWindow()
+      .onDragDropEvent((event) => {
+        if (event.payload.type === "drop") {
+          const paths = event.payload.paths;
+          if (paths && paths.length > 0) {
+            setManualPath(paths[0]);
+            handleInspect(paths[0]);
+          }
+        }
+      })
+      .then((unsub) => {
+        unlisten = unsub;
+      })
+      .catch((err) => {
+        console.warn("Native drag-drop listener error:", err);
+      });
 
     return () => {
       unlisten?.();
@@ -193,6 +218,18 @@ ${fullSystemReport}`;
     setTimeout(() => setCopiedDiagnostics(false), 2500);
   };
 
+  const handleBrowseFile = async () => {
+    try {
+      const picked = await pickIpaFile();
+      if (picked) {
+        setManualPath(picked);
+        handleInspect(picked);
+      }
+    } catch (err) {
+      console.error("Failed to pick file:", err);
+    }
+  };
+
   const onDragOver = (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(true);
@@ -208,15 +245,6 @@ ${fullSystemReport}`;
 
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
       const file = e.dataTransfer.files[0];
-      const filePath = (file as unknown as { path?: string }).path || file.name;
-      setManualPath(filePath);
-      handleInspect(filePath);
-    }
-  };
-
-  const onFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files.length > 0) {
-      const file = e.target.files[0];
       const filePath = (file as unknown as { path?: string }).path || file.name;
       setManualPath(filePath);
       handleInspect(filePath);
@@ -283,16 +311,8 @@ ${fullSystemReport}`;
             onDragOver={onDragOver}
             onDragLeave={onDragLeave}
             onDrop={onDrop}
-            onClick={() => fileInputRef.current?.click()}
+            onClick={handleBrowseFile}
           >
-            <input
-              type="file"
-              ref={fileInputRef}
-              accept=".ipa"
-              style={{ display: "none" }}
-              onChange={onFileInputChange}
-            />
-
             {isInspecting ? (
               <div className="inspecting-state">
                 <RefreshCw size={44} className="spin-icon text-accent mb-3" />
@@ -304,7 +324,14 @@ ${fullSystemReport}`;
                 <UploadCloud size={48} className="dropzone-icon" />
                 <h3 className="dropzone-title">{STRINGS.installFlow.dropPrompt}</h3>
                 <p className="dropzone-subtitle">{STRINGS.installFlow.supportedFormat}</p>
-                <button type="button" className="btn btn-primary mt-3">
+                <button
+                  type="button"
+                  className="btn btn-primary mt-3"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleBrowseFile();
+                  }}
+                >
                   Browse .ipa File
                 </button>
               </>
@@ -678,12 +705,32 @@ ${fullSystemReport}`;
                       </span>
                       <span
                         className={`status-pill ml-2 ${
-                          activeDevice.developer_mode_enabled ? "pill-success" : "pill-danger"
+                          activeDevice.developer_mode_enabled || manualDevModeConfirmed
+                            ? "pill-success"
+                            : "pill-warning"
                         }`}
                         style={{ marginLeft: "0.5rem" }}
                       >
-                        DevMode: {activeDevice.developer_mode_enabled ? "On" : "Off"}
+                        DevMode:{" "}
+                        {activeDevice.developer_mode_enabled || manualDevModeConfirmed
+                          ? "On"
+                          : "Unverified"}
                       </span>
+                      {!activeDevice.developer_mode_enabled && !manualDevModeConfirmed && (
+                        <button
+                          type="button"
+                          className="btn btn-outline btn-sm text-accent"
+                          onClick={() => setManualDevModeConfirmed(true)}
+                          style={{
+                            marginLeft: "0.5rem",
+                            padding: "0.1rem 0.4rem",
+                            fontSize: "0.7rem",
+                          }}
+                          title="Click if you turned Developer Mode ON in iPhone Settings"
+                        >
+                          Mark as ON
+                        </button>
+                      )}
                     </div>
                   </div>
                 ) : (

@@ -25,9 +25,34 @@ pub struct IpaMetadata {
     pub original_entitlements: Vec<String>,
 }
 
+/// Intelligently resolves an IPA path:
+/// 1. Checks if the given path exists as-is.
+/// 2. If given a relative path or filename, checks %USERPROFILE%\Downloads and %USERPROFILE%\Desktop.
+pub fn resolve_ipa_path(input_path: &Path) -> PathBuf {
+    if input_path.exists() {
+        return input_path.to_path_buf();
+    }
+
+    if let Some(file_name) = input_path.file_name() {
+        if let Ok(profile) = std::env::var("USERPROFILE") {
+            let in_downloads = PathBuf::from(&profile).join("Downloads").join(file_name);
+            if in_downloads.exists() {
+                return in_downloads;
+            }
+            let in_desktop = PathBuf::from(&profile).join("Desktop").join(file_name);
+            if in_desktop.exists() {
+                return in_desktop;
+            }
+        }
+    }
+
+    input_path.to_path_buf()
+}
+
 /// Inspects an IPA package from a file path.
 pub fn inspect_ipa(path: &Path) -> Result<IpaMetadata, WinIpaError> {
-    reader::inspect_ipa_file(path)
+    let resolved = resolve_ipa_path(path);
+    reader::inspect_ipa_file(&resolved)
 }
 
 /// Creates an isolated temporary directory under %TEMP%\WinIPA for safe extraction and signing.
@@ -49,17 +74,18 @@ pub fn create_temp_work_dir() -> Result<tempfile::TempDir, WinIpaError> {
 
 /// Verifies that a file path exists and is a readable Zip archive.
 pub fn verify_zip_archive(path: &Path) -> Result<PathBuf, WinIpaError> {
-    if !path.exists() {
+    let resolved = resolve_ipa_path(path);
+    if !resolved.exists() {
         return Err(WinIpaError::InvalidIpa("File does not exist".into()));
     }
 
-    let file = File::open(path)
+    let file = File::open(&resolved)
         .map_err(|e| WinIpaError::InvalidIpa(format!("Cannot open file for reading: {e}")))?;
 
     ZipArchive::new(file)
         .map_err(|e| WinIpaError::InvalidIpa(format!("File is not a valid zip archive: {e}")))?;
 
-    Ok(path.to_path_buf())
+    Ok(resolved)
 }
 
 #[cfg(test)]

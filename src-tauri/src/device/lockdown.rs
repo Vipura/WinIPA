@@ -164,6 +164,7 @@ pub fn parse_developer_mode_response(resp: &Value, ios_version: &str) -> bool {
     }
 
     if let Some(dict) = resp.as_dictionary() {
+        // If lockdown returns an explicit boolean or integer value:
         if let Some(val) = dict.get("Value") {
             if let Some(b) = val.as_boolean() {
                 return b;
@@ -172,9 +173,17 @@ pub fn parse_developer_mode_response(resp: &Value, ios_version: &str) -> bool {
                 return i != 0;
             }
         }
+
+        // If lockdown returned an Error (such as GetProhibited or SessionInactive)
+        // because the unauthenticated handshake cannot query protected AMFI keys,
+        // do not falsely claim Developer Mode is disabled. Assume true.
+        if dict.contains_key("Error") {
+            return true;
+        }
     }
 
-    false
+    // Default to true to prevent false-negative warnings
+    true
 }
 
 /// Queries all device properties from an active lockdown TCP stream.

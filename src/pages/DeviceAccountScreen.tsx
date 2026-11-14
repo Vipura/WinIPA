@@ -53,6 +53,7 @@ export const DeviceAccountScreen: React.FC<DeviceAccountScreenProps> = ({ onNavi
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
   const [isExportingDiagnostics, setIsExportingDiagnostics] = useState<boolean>(false);
   const [diagnosticsExportMsg, setDiagnosticsExportMsg] = useState<string | null>(null);
+  const [manualDevModeConfirmed, setManualDevModeConfirmed] = useState<boolean>(false);
 
   // Auth Modal State
   const [isAuthModalOpen, setIsAuthModalOpen] = useState<boolean>(false);
@@ -397,10 +398,14 @@ export const DeviceAccountScreen: React.FC<DeviceAccountScreenProps> = ({ onNavi
                 <span className="detail-label">Developer Mode:</span>
                 <span
                   className={`status-pill ${
-                    activeDevice.developer_mode_enabled ? "pill-success" : "pill-danger"
+                    activeDevice.developer_mode_enabled || manualDevModeConfirmed
+                      ? "pill-success"
+                      : "pill-warning"
                   }`}
                 >
-                  {activeDevice.developer_mode_enabled ? "Enabled" : "Disabled"}
+                  {activeDevice.developer_mode_enabled || manualDevModeConfirmed
+                    ? "Enabled"
+                    : "Disabled / Unverified"}
                 </span>
               </div>
 
@@ -416,12 +421,20 @@ export const DeviceAccountScreen: React.FC<DeviceAccountScreenProps> = ({ onNavi
               )}
 
               {/* Warning for Developer Mode Off on iOS 16+ */}
-              {!activeDevice.developer_mode_enabled && (
+              {!activeDevice.developer_mode_enabled && !manualDevModeConfirmed && (
                 <div className="status-notice notice-danger mt-3">
                   <ShieldX size={16} className="shrink-0" />
                   <div>
                     <strong>{STRINGS.device.developerModeTitle}</strong>
                     <p className="text-sm mt-0.5">{STRINGS.device.developerModeMsg}</p>
+                    <button
+                      type="button"
+                      className="btn btn-outline btn-sm text-accent mt-2"
+                      onClick={() => setManualDevModeConfirmed(true)}
+                      style={{ fontSize: "0.75rem", padding: "0.25rem 0.6rem" }}
+                    >
+                      I have already enabled Developer Mode
+                    </button>
                   </div>
                 </div>
               )}
