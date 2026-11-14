@@ -12,6 +12,7 @@ use plist::Value;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use std::collections::HashMap;
 use std::io::Cursor;
+use std::sync::Mutex;
 use std::time::Duration;
 
 pub const DEVELOPER_API_BASE: &str = "https://developerservices2.apple.com/services/QH65B2";
@@ -22,11 +23,43 @@ pub const AUTHKIT_VERIFY_2FA_URL: &str =
 pub struct AppleDeveloperClient {
     pub anisette: Box<dyn AnisetteProvider>,
     pub http_client: reqwest::Client,
-    pub session: Option<AppleSessionInfo>,
-    pub session_token: Option<String>,
+    pub session: Mutex<Option<AppleSessionInfo>>,
+    pub session_token: Mutex<Option<String>>,
     pub pending_apple_id: Option<String>,
+    pub pending_password: Option<String>,
     pub pending_session_id: Option<String>,
     pub pending_scnt: Option<String>,
+}
+
+/// Helper function to reliably extract an Apple session token / myacinfo cookie
+fn extract_apple_session_token(headers: &HeaderMap, fallback: Option<&str>) -> Option<String> {
+    // 1. Direct x-apple-session-token header
+    if let Some(t) = headers
+        .get("x-apple-session-token")
+        .and_then(|v| v.to_str().ok())
+    {
+        let trimmed = t.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    // 2. Set-Cookie myacinfo cookie
+    for cookie in headers.get_all(reqwest::header::SET_COOKIE) {
+        if let Ok(c_str) = cookie.to_str() {
+            for part in c_str.split(';') {
+                let part = part.trim();
+                if let Some(val) = part.strip_prefix("myacinfo=") {
+                    if !val.is_empty() {
+                        return Some(val.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Fallback to pending session id (from initial 409 response)
+    fallback.map(|s| s.to_string())
 }
 
 impl AppleDeveloperClient {
@@ -40,12 +73,55 @@ impl AppleDeveloperClient {
         Self {
             anisette: Box::new(RemoteAnisetteProvider::new(anisette_url)),
             http_client: client,
-            session: None,
-            session_token: None,
+            session: Mutex::new(None),
+            session_token: Mutex::new(None),
             pending_apple_id: None,
+            pending_password: None,
             pending_session_id: None,
             pending_scnt: None,
         }
+    }
+
+    /// Retrieves the active session token from memory or restores from Windows Credential Manager.
+    fn get_or_restore_session_token(&self) -> Option<String> {
+        if let Ok(guard) = self.session_token.lock() {
+            if let Some(ref t) = *guard {
+                if !t.is_empty() {
+                    return Some(t.clone());
+                }
+            }
+        }
+
+        // Try Windows Credential Manager
+        if let Ok(Some(apple_id)) = get_secret("active_apple_id") {
+            if let Ok(Some(token)) = get_secret(&format!("session:{apple_id}")) {
+                if !token.is_empty() {
+                    if let Ok(mut guard) = self.session_token.lock() {
+                        *guard = Some(token.clone());
+                    }
+                    return Some(token);
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Retrieves current team ID if available.
+    fn get_current_team_id(&self) -> String {
+        if let Ok(guard) = self.session.lock() {
+            if let Some(ref s) = *guard {
+                return s.team_id.clone();
+            }
+        }
+        if let Ok(Some(apple_id)) = get_secret("active_apple_id") {
+            if let Ok(Some(info_json)) = get_secret(&format!("info:{apple_id}")) {
+                if let Ok(s) = serde_json::from_str::<AppleSessionInfo>(&info_json) {
+                    return s.team_id;
+                }
+            }
+        }
+        "PERSONAL".to_string()
     }
 
     /// Builds standard Apple headers with Anisette machine telemetry.
@@ -88,8 +164,10 @@ impl AppleDeveloperClient {
         action: &str,
         params: &HashMap<String, String>,
     ) -> Result<Value, WinIpaError> {
-        let token = self.session_token.as_ref().ok_or_else(|| {
-            WinIpaError::AppleAuthFailed("No active Apple developer session".into())
+        let token = self.get_or_restore_session_token().ok_or_else(|| {
+            WinIpaError::AppleAuthFailed(
+                "No active Apple developer session. Please sign in with your Apple ID in Device & Account.".into(),
+            )
         })?;
 
         let url = format!("{DEVELOPER_API_BASE}/{action}");
@@ -97,7 +175,7 @@ impl AppleDeveloperClient {
         // Build XML plist body
         let mut plist_dict = plist::Dictionary::new();
         plist_dict.insert("clientId".into(), Value::String("XABBG36SBA".into()));
-        plist_dict.insert("myacinfo".into(), Value::String(token.clone()));
+        plist_dict.insert("myacinfo".into(), Value::String(token));
         plist_dict.insert("protocolVersion".into(), Value::String("QH65B2".into()));
         plist_dict.insert(
             "requestId".into(),
@@ -116,12 +194,30 @@ impl AppleDeveloperClient {
             }
         })?;
 
-        let resp = self
+        let mut req = self
             .http_client
             .post(&url)
             .header("Content-Type", "text/x-xml-plist")
             .header("User-Agent", "Xcode/15.2 (15C500b)")
-            .body(body_bytes)
+            .body(body_bytes);
+
+        if let Ok(ani) = self.anisette.get_headers().await {
+            let set_header = |headers: &mut HeaderMap, name: &'static str, val: &str| {
+                if let Ok(hval) = HeaderValue::from_str(val) {
+                    headers.insert(HeaderName::from_static(name), hval);
+                }
+            };
+            let mut hmap = HeaderMap::new();
+            set_header(&mut hmap, "x-apple-i-md", &ani.x_apple_i_md);
+            set_header(&mut hmap, "x-apple-i-md-m", &ani.x_apple_i_md_m);
+            set_header(&mut hmap, "x-apple-i-md-rinfo", &ani.x_apple_i_md_rinfo);
+            set_header(&mut hmap, "x-apple-i-md-lu", &ani.x_apple_i_md_lu);
+            set_header(&mut hmap, "x-mme-device-id", &ani.x_mme_device_id);
+            set_header(&mut hmap, "x-mme-client-info", &ani.x_mme_client_info);
+            req = req.headers(hmap);
+        }
+
+        let resp = req
             .send()
             .await
             .map_err(|e| WinIpaError::Timeout(format!("Developer API {action}: {e}")))?;
@@ -148,12 +244,13 @@ impl AppleDeveloperClient {
                     let err_string = dict
                         .get("userString")
                         .and_then(|v| v.as_string())
+                        .or_else(|| dict.get("errorMessage").and_then(|v| v.as_string()))
                         .unwrap_or("Developer portal rejected request");
 
                     return match result_code {
                         35 => Err(WinIpaError::AccountLimitReached(err_string.into())),
                         1100 => Err(WinIpaError::AppleAuthFailed(
-                            "Session expired. Please log in again.".into(),
+                            "Apple developer session expired. Please sign in again in Device & Account.".into(),
                         )),
                         3038 | 3041 => Err(WinIpaError::AppleRateLimited),
                         _ => Err(WinIpaError::Unknown {
@@ -166,6 +263,62 @@ impl AppleDeveloperClient {
         }
 
         Ok(plist_resp)
+    }
+
+    /// Queries Developer Portal for user teams.
+    pub async fn fetch_teams(
+        &self,
+    ) -> Result<Vec<(String, String, AppleAccountType)>, WinIpaError> {
+        let params = HashMap::new();
+        let resp = self.call_developer_api("listTeams.action", &params).await?;
+        let mut teams = Vec::new();
+        if let Some(dict) = resp.as_dictionary() {
+            if let Some(teams_arr) = dict.get("teams").and_then(|v| v.as_array()) {
+                for t in teams_arr {
+                    if let Some(tdict) = t.as_dictionary() {
+                        let tid = tdict
+                            .get("teamId")
+                            .and_then(|v| v.as_string())
+                            .unwrap_or("")
+                            .to_string();
+                        let tname = tdict
+                            .get("name")
+                            .and_then(|v| v.as_string())
+                            .unwrap_or("Personal Team")
+                            .to_string();
+                        let ttype_str = tdict
+                            .get("type")
+                            .and_then(|v| v.as_string())
+                            .unwrap_or("Free");
+                        let acct_type = if ttype_str.eq_ignore_ascii_case("Company/Organization")
+                            || ttype_str.eq_ignore_ascii_case("Paid")
+                        {
+                            AppleAccountType::Paid
+                        } else {
+                            AppleAccountType::Free
+                        };
+                        if !tid.is_empty() {
+                            teams.push((tid, tname, acct_type));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(teams)
+    }
+
+    async fn try_fetch_initial_team(&self, apple_id: &str) -> (String, String, AppleAccountType) {
+        match self.fetch_teams().await {
+            Ok(teams) if !teams.is_empty() => {
+                let (tid, tname, acct) = teams.into_iter().next().unwrap();
+                (tid, tname, acct)
+            }
+            _ => (
+                "PERSONAL".to_string(),
+                format!("{apple_id} (Personal Team)"),
+                AppleAccountType::Free,
+            ),
+        }
     }
 }
 
@@ -204,9 +357,11 @@ impl AppleService for AppleDeveloperClient {
             return Err(WinIpaError::AppleRateLimited);
         }
 
+        self.pending_apple_id = Some(apple_id.to_string());
+        self.pending_password = Some(password.to_string());
+
         // Check for 2FA requirement (HTTP 409 or x-apple-session-token / scnt headers)
         if status.as_u16() == 409 || resp_headers.contains_key("x-apple-session-token") {
-            self.pending_apple_id = Some(apple_id.to_string());
             if let Some(token) = resp_headers
                 .get("x-apple-session-token")
                 .and_then(|v| v.to_str().ok())
@@ -222,21 +377,25 @@ impl AppleService for AppleDeveloperClient {
             });
         }
 
-        // Check for direct session token
-        if let Some(token) = resp_headers
-            .get("x-apple-session-token")
-            .and_then(|v| v.to_str().ok())
-        {
-            self.session_token = Some(token.to_string());
+        // Direct success without 2FA
+        let token_opt = extract_apple_session_token(&resp_headers, None);
+        if let Some(ref token) = token_opt {
+            if let Ok(mut lock) = self.session_token.lock() {
+                *lock = Some(token.clone());
+            }
             let _ = store_secret(&format!("session:{apple_id}"), token);
         }
 
-        // Query developer team info to establish session
+        let _ = store_secret("active_apple_id", apple_id);
+        let _ = store_secret(&format!("auth:{apple_id}"), password);
+
+        let (team_id, team_name, account_type) = self.try_fetch_initial_team(apple_id).await;
+
         let session_info = AppleSessionInfo {
             apple_id: apple_id.to_string(),
-            team_id: "PERSONAL".to_string(),
-            team_name: format!("{apple_id} (Personal Team)"),
-            account_type: AppleAccountType::Free,
+            team_id,
+            team_name,
+            account_type,
             cert_expires_at: Some(
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -246,7 +405,14 @@ impl AppleService for AppleDeveloperClient {
             ),
         };
 
-        self.session = Some(session_info.clone());
+        if let Ok(info_json) = serde_json::to_string(&session_info) {
+            let _ = store_secret(&format!("info:{apple_id}"), &info_json);
+        }
+
+        if let Ok(mut lock) = self.session.lock() {
+            *lock = Some(session_info.clone());
+        }
+
         Ok(LoginResult::Success(session_info))
     }
 
@@ -289,20 +455,29 @@ impl AppleService for AppleDeveloperClient {
             ));
         }
 
-        if let Some(token) = resp
-            .headers()
-            .get("x-apple-session-token")
-            .and_then(|v| v.to_str().ok())
-        {
-            self.session_token = Some(token.to_string());
+        let resp_headers = resp.headers().clone();
+        let token_opt =
+            extract_apple_session_token(&resp_headers, self.pending_session_id.as_deref());
+
+        if let Some(ref token) = token_opt {
+            if let Ok(mut lock) = self.session_token.lock() {
+                *lock = Some(token.clone());
+            }
             let _ = store_secret(&format!("session:{apple_id}"), token);
         }
+        let _ = store_secret("active_apple_id", &apple_id);
+
+        if let Some(ref pwd) = self.pending_password {
+            let _ = store_secret(&format!("auth:{apple_id}"), pwd);
+        }
+
+        let (team_id, team_name, account_type) = self.try_fetch_initial_team(&apple_id).await;
 
         let session_info = AppleSessionInfo {
             apple_id: apple_id.clone(),
-            team_id: "PERSONAL".to_string(),
-            team_name: format!("{apple_id} (Personal Team)"),
-            account_type: AppleAccountType::Free,
+            team_id,
+            team_name,
+            account_type,
             cert_expires_at: Some(
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -312,8 +487,16 @@ impl AppleService for AppleDeveloperClient {
             ),
         };
 
-        self.session = Some(session_info.clone());
+        if let Ok(info_json) = serde_json::to_string(&session_info) {
+            let _ = store_secret(&format!("info:{apple_id}"), &info_json);
+        }
+
+        if let Ok(mut lock) = self.session.lock() {
+            *lock = Some(session_info.clone());
+        }
+
         self.pending_apple_id = None;
+        self.pending_password = None;
         self.pending_session_id = None;
         self.pending_scnt = None;
 
@@ -321,19 +504,58 @@ impl AppleService for AppleDeveloperClient {
     }
 
     async fn get_active_session(&self) -> Result<Option<AppleSessionInfo>, WinIpaError> {
-        if let Some(ref s) = self.session {
-            return Ok(Some(s.clone()));
+        if let Ok(guard) = self.session.lock() {
+            if let Some(ref s) = *guard {
+                return Ok(Some(s.clone()));
+            }
         }
 
         // Check Windows Credential Manager for stored session
-        if let Ok(Some(token)) = get_secret("active_apple_id") {
-            let session_info = AppleSessionInfo {
-                apple_id: token.clone(),
-                team_id: "PERSONAL".to_string(),
-                team_name: format!("{token} (Personal Team)"),
-                account_type: AppleAccountType::Free,
-                cert_expires_at: None,
-            };
+        if let Ok(Some(apple_id)) = get_secret("active_apple_id") {
+            // Restore session token
+            if let Ok(Some(token)) = get_secret(&format!("session:{apple_id}")) {
+                if let Ok(mut guard) = self.session_token.lock() {
+                    *guard = Some(token);
+                }
+            }
+
+            let session_info =
+                if let Ok(Some(info_json)) = get_secret(&format!("info:{apple_id}")) {
+                    serde_json::from_str::<AppleSessionInfo>(&info_json).unwrap_or_else(|_| {
+                        AppleSessionInfo {
+                            apple_id: apple_id.clone(),
+                            team_id: "PERSONAL".to_string(),
+                            team_name: format!("{apple_id} (Personal Team)"),
+                            account_type: AppleAccountType::Free,
+                            cert_expires_at: Some(
+                                std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs()
+                                    + 7 * 86400,
+                            ),
+                        }
+                    })
+                } else {
+                    AppleSessionInfo {
+                        apple_id: apple_id.clone(),
+                        team_id: "PERSONAL".to_string(),
+                        team_name: format!("{apple_id} (Personal Team)"),
+                        account_type: AppleAccountType::Free,
+                        cert_expires_at: Some(
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs()
+                                + 7 * 86400,
+                        ),
+                    }
+                };
+
+            if let Ok(mut guard) = self.session.lock() {
+                *guard = Some(session_info.clone());
+            }
+
             return Ok(Some(session_info));
         }
 
@@ -341,22 +563,42 @@ impl AppleService for AppleDeveloperClient {
     }
 
     async fn logout(&mut self) -> Result<(), WinIpaError> {
-        if let Some(ref s) = self.session {
-            let _ = delete_secret(&format!("session:{}", s.apple_id));
+        if let Ok(Some(apple_id)) = get_secret("active_apple_id") {
+            let _ = delete_secret(&format!("session:{apple_id}"));
+            let _ = delete_secret(&format!("auth:{apple_id}"));
+            let _ = delete_secret(&format!("info:{apple_id}"));
+        }
+        if let Ok(guard) = self.session.lock() {
+            if let Some(ref s) = *guard {
+                let _ = delete_secret(&format!("session:{}", s.apple_id));
+                let _ = delete_secret(&format!("auth:{}", s.apple_id));
+                let _ = delete_secret(&format!("info:{}", s.apple_id));
+            }
         }
         let _ = delete_secret("active_apple_id");
-        self.session = None;
-        self.session_token = None;
+
+        if let Ok(mut guard) = self.session.lock() {
+            *guard = None;
+        }
+        if let Ok(mut guard) = self.session_token.lock() {
+            *guard = None;
+        }
         self.pending_apple_id = None;
+        self.pending_password = None;
         self.pending_session_id = None;
         self.pending_scnt = None;
+
         Ok(())
     }
 
     async fn register_device(&self, udid: &str, name: &str) -> Result<String, WinIpaError> {
+        let team_id = self.get_current_team_id();
         let mut params = HashMap::new();
         params.insert("deviceNumber".into(), udid.to_string());
         params.insert("name".into(), name.to_string());
+        if team_id != "PERSONAL" && !team_id.is_empty() {
+            params.insert("teamId".into(), team_id);
+        }
 
         let resp = self.call_developer_api("addDevice.action", &params).await?;
 
@@ -377,9 +619,13 @@ impl AppleService for AppleDeveloperClient {
         bundle_id: &str,
         name: &str,
     ) -> Result<String, WinIpaError> {
+        let team_id = self.get_current_team_id();
         let mut params = HashMap::new();
         params.insert("identifier".into(), bundle_id.to_string());
         params.insert("name".into(), name.to_string());
+        if team_id != "PERSONAL" && !team_id.is_empty() {
+            params.insert("teamId".into(), team_id);
+        }
 
         let resp = self.call_developer_api("addAppId.action", &params).await?;
 
@@ -395,16 +641,14 @@ impl AppleService for AppleDeveloperClient {
     }
 
     async fn request_development_certificate(&self) -> Result<DevelopmentCertificate, WinIpaError> {
-        let team_id = self
-            .session
-            .as_ref()
-            .map(|s| s.team_id.as_str())
-            .unwrap_or("PERSONAL");
-
-        let key_pair = generate_dev_csr("Apple Development: WinIPA User", team_id)?;
+        let team_id = self.get_current_team_id();
+        let key_pair = generate_dev_csr("Apple Development: WinIPA User", &team_id)?;
 
         let mut params = HashMap::new();
         params.insert("csrContent".into(), key_pair.csr_pem.clone());
+        if team_id != "PERSONAL" && !team_id.is_empty() {
+            params.insert("teamId".into(), team_id);
+        }
 
         let resp = self
             .call_developer_api("addDevelopmentCert.action", &params)
@@ -433,7 +677,7 @@ impl AppleService for AppleDeveloperClient {
             cert_id,
             certificate_data: cert_data,
             private_key_pem: key_pair.private_key_pem,
-            expires_at: now + 7 * 86400, // 7 days for free accounts
+            expires_at: now + 7 * 86400,
         })
     }
 
@@ -443,10 +687,14 @@ impl AppleService for AppleDeveloperClient {
         device_id: &str,
         cert_id: &str,
     ) -> Result<ProvisioningProfile, WinIpaError> {
+        let team_id = self.get_current_team_id();
         let mut params = HashMap::new();
         params.insert("appIdId".into(), app_id_id.to_string());
         params.insert("deviceId".into(), device_id.to_string());
         params.insert("certificateId".into(), cert_id.to_string());
+        if team_id != "PERSONAL" && !team_id.is_empty() {
+            params.insert("teamId".into(), team_id);
+        }
 
         let resp = self
             .call_developer_api("downloadTeamProvisioningProfile.action", &params)

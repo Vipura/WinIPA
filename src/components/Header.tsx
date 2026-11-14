@@ -3,13 +3,16 @@
 
 import React from "react";
 import { STRINGS } from "../strings";
-import { Smartphone, Moon, Sun, ShieldCheck } from "lucide-react";
+import { Smartphone, Moon, Sun, ShieldCheck, User, LogOut } from "lucide-react";
+import { AppleSessionInfo } from "../types";
 
 interface HeaderProps {
   currentView: "home" | "install" | "device-account";
   onNavigate: (view: "home" | "install" | "device-account") => void;
   isDarkMode: boolean;
   onToggleTheme: () => void;
+  appleSession?: AppleSessionInfo | null;
+  onLogout?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -17,6 +20,8 @@ export const Header: React.FC<HeaderProps> = ({
   onNavigate,
   isDarkMode,
   onToggleTheme,
+  appleSession,
+  onLogout,
 }) => {
   return (
     <header className="header">
@@ -31,6 +36,25 @@ export const Header: React.FC<HeaderProps> = ({
       </div>
 
       <div className="header-right">
+        {appleSession && (
+          <div className="header-account-pill" title={`Apple ID: ${appleSession.apple_id}`}>
+            <User size={13} className="text-accent shrink-0" />
+            <span className="header-account-email">{appleSession.apple_id}</span>
+            {onLogout && (
+              <button
+                type="button"
+                className="header-logout-btn"
+                onClick={onLogout}
+                title="Log out of Apple account"
+                aria-label="Log out of Apple account"
+              >
+                <LogOut size={12} />
+                <span>Log Out</span>
+              </button>
+            )}
+          </div>
+        )}
+
         <div className="gpl-tag" title={STRINGS.app.gplNotice}>
           <ShieldCheck size={14} />
           <span>GPL-3.0</span>

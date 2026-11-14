@@ -14,7 +14,7 @@ import {
 import { inspectIpaPackage, pickIpaFile } from "../api/ipa";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { getConnectedDevices } from "../api/device";
-import { appleGetSession } from "../api/apple";
+import { appleGetSession, appleLogout } from "../api/apple";
 import {
   startInstallationPipeline,
   cancelInstallationPipeline,
@@ -37,13 +37,22 @@ import {
   Copy,
   Check,
   Info,
+  LogOut,
 } from "lucide-react";
 
 interface InstallIpaScreenProps {
   onNavigate: (view: "home" | "install" | "device-account") => void;
+  appleSession?: AppleSessionInfo | null;
+  onSessionRefresh?: () => void;
+  onLogout?: () => void;
 }
 
-export const InstallIpaScreen: React.FC<InstallIpaScreenProps> = ({ onNavigate }) => {
+export const InstallIpaScreen: React.FC<InstallIpaScreenProps> = ({
+  onNavigate,
+  appleSession: propAppleSession,
+  onSessionRefresh,
+  onLogout,
+}) => {
   const [isDragging, setIsDragging] = useState<boolean>(false);
   const [isInspecting, setIsInspecting] = useState<boolean>(false);
   const [metadata, setMetadata] = useState<IpaMetadata | null>(null);
@@ -53,8 +62,27 @@ export const InstallIpaScreen: React.FC<InstallIpaScreenProps> = ({ onNavigate }
   // Device & Account prerequisites
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
   const [selectedUdid, setSelectedUdid] = useState<string>("");
-  const [appleSession, setAppleSession] = useState<AppleSessionInfo | null>(null);
+  const [appleSession, setAppleSession] = useState<AppleSessionInfo | null>(
+    propAppleSession || null
+  );
   const [customBundleId, setCustomBundleId] = useState<string>("");
+
+  useEffect(() => {
+    if (propAppleSession !== undefined) {
+      setAppleSession(propAppleSession);
+    }
+  }, [propAppleSession]);
+
+  const handleLogout = async () => {
+    try {
+      await appleLogout();
+      setAppleSession(null);
+      onLogout?.();
+      onSessionRefresh?.();
+    } catch (err) {
+      console.error("Failed to log out:", err);
+    }
+  };
 
   // Pipeline execution state
   const [isPipelineRunning, setIsPipelineRunning] = useState<boolean>(false);
@@ -750,7 +778,25 @@ ${fullSystemReport}`;
               <div className="prep-card-content">
                 {appleSession ? (
                   <div>
-                    <strong className="font-mono">{appleSession.apple_id}</strong>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <strong className="font-mono">{appleSession.apple_id}</strong>
+                      <button
+                        type="button"
+                        className="btn btn-outline btn-sm text-danger"
+                        onClick={handleLogout}
+                        style={{
+                          display: "inline-flex",
+                          gap: "0.3rem",
+                          alignItems: "center",
+                          padding: "0.15rem 0.45rem",
+                          fontSize: "0.75rem",
+                        }}
+                        title="Log out of Apple account"
+                      >
+                        <LogOut size={12} />
+                        <span>Log Out</span>
+                      </button>
+                    </div>
                     <div className="text-xs text-muted mt-1">
                       Team: {appleSession.team_name}
                     </div>

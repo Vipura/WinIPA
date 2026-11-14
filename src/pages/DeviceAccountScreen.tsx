@@ -43,12 +43,26 @@ import {
 
 interface DeviceAccountScreenProps {
   onNavigate: (view: "home" | "install" | "device-account") => void;
+  appleSession?: AppleSessionInfo | null;
+  onSessionChange?: (session: AppleSessionInfo | null) => void;
 }
 
-export const DeviceAccountScreen: React.FC<DeviceAccountScreenProps> = ({ onNavigate }) => {
+export const DeviceAccountScreen: React.FC<DeviceAccountScreenProps> = ({
+  onNavigate,
+  appleSession: initialAppleSession,
+  onSessionChange,
+}) => {
   const [driverStatus, setDriverStatus] = useState<DeviceDriverStatus | null>(null);
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
-  const [appleSession, setAppleSession] = useState<AppleSessionInfo | null>(null);
+  const [appleSession, setAppleSession] = useState<AppleSessionInfo | null>(
+    initialAppleSession || null
+  );
+
+  useEffect(() => {
+    if (initialAppleSession !== undefined) {
+      setAppleSession(initialAppleSession);
+    }
+  }, [initialAppleSession]);
   const [installedApps, setInstalledApps] = useState<InstalledAppRecord[]>([]);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
   const [isExportingDiagnostics, setIsExportingDiagnostics] = useState<boolean>(false);
@@ -164,6 +178,7 @@ export const DeviceAccountScreen: React.FC<DeviceAccountScreenProps> = ({ onNavi
       const res = await appleLogin(email.trim(), password);
       if (res.type === "Success") {
         setAppleSession(res.data);
+        onSessionChange?.(res.data);
         setIsAuthModalOpen(false);
         setPassword("");
       } else if (res.type === "TwoFactorRequired") {
@@ -190,6 +205,7 @@ export const DeviceAccountScreen: React.FC<DeviceAccountScreenProps> = ({ onNavi
     try {
       const session = await appleSubmit2Fa(twoFaCode.trim());
       setAppleSession(session);
+      onSessionChange?.(session);
       setIsAuthModalOpen(false);
       setPassword("");
       setTwoFaCode("");
@@ -205,6 +221,7 @@ export const DeviceAccountScreen: React.FC<DeviceAccountScreenProps> = ({ onNavi
     try {
       await appleLogout();
       setAppleSession(null);
+      onSessionChange?.(null);
     } catch (err) {
       console.error("Failed to log out:", err);
     }
