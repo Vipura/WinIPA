@@ -1,0 +1,38 @@
+[package]
+name = "winipa"
+version = "0.1.0"
+description = "Test iOS apps on iPhone from Windows without a Mac"
+authors = ["WinIPA Contributors"]
+edition = "2021"
+license = "GPL-3.0-only"
+
+[lib]
+name = "winipa_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.0", features = [] }
+
+[dependencies]
+tauri = { version = "2.0", features = [] }
+tauri-plugin-opener = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tokio = { version = "1.43", features = ["sync", "time", "rt-multi-thread"] }
+plist = "1.7"
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
+keyring = "3.6"
+uuid = { version = "1.13", features = ["v4"] }
+regex = "1.11"
+tempfile = "3.17"
+
+[dev-dependencies]
+tokio = { version = "1.43", features = ["full"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true
