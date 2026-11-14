@@ -48,6 +48,24 @@ export interface AppleSessionInfo {
   cert_expires_at?: number;
 }
 
+export type LoginResult =
+  | { type: "Success"; data: AppleSessionInfo }
+  | { type: "TwoFactorRequired"; data: { phone_numbers: string[] } };
+
+export interface DevelopmentCertificate {
+  cert_id: string;
+  serial_number: string;
+  pem_certificate: string;
+  private_key_pem: string;
+}
+
+export interface ProvisioningProfile {
+  profile_id: string;
+  profile_name: string;
+  profile_data_base64: string;
+  expiration_date: number;
+}
+
 export interface InstalledAppRecord {
   bundle_id: string;
   app_name: string;

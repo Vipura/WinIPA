@@ -12,6 +12,12 @@ import {
   listenToDriverUpdates,
 } from "../api/device";
 import {
+  appleLogin,
+  appleSubmit2Fa,
+  appleGetSession,
+  appleLogout,
+} from "../api/apple";
+import {
   Smartphone,
   User,
   ShieldAlert,
@@ -22,6 +28,12 @@ import {
   ExternalLink,
   ShieldX,
   Lock,
+  LogOut,
+  X,
+  ShieldCheck,
+  Calendar,
+  CheckCircle2,
+  Info,
 } from "lucide-react";
 
 interface DeviceAccountScreenProps {
@@ -31,9 +43,18 @@ interface DeviceAccountScreenProps {
 export const DeviceAccountScreen: React.FC<DeviceAccountScreenProps> = ({ onNavigate }) => {
   const [driverStatus, setDriverStatus] = useState<DeviceDriverStatus | null>(null);
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
-  const [appleSession] = useState<AppleSessionInfo | null>(null);
+  const [appleSession, setAppleSession] = useState<AppleSessionInfo | null>(null);
   const [installedApps] = useState<InstalledAppRecord[]>([]);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
+
+  // Auth Modal State
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState<boolean>(false);
+  const [authStep, setAuthStep] = useState<"credentials" | "2fa">("credentials");
+  const [email, setEmail] = useState<string>("");
+  const [password, setPassword] = useState<string>("");
+  const [twoFaCode, setTwoFaCode] = useState<string>("");
+  const [authLoading, setAuthLoading] = useState<boolean>(false);
+  const [authError, setAuthError] = useState<string | null>(null);
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -45,8 +66,12 @@ export const DeviceAccountScreen: React.FC<DeviceAccountScreenProps> = ({ onNavi
       } else {
         setDevices([]);
       }
+
+      // Check for active Apple session
+      const session = await appleGetSession();
+      setAppleSession(session);
     } catch (err) {
-      console.error("Failed to load device/driver status:", err);
+      console.error("Failed to load device/driver/session status:", err);
     }
   }, []);
 
@@ -85,14 +110,103 @@ export const DeviceAccountScreen: React.FC<DeviceAccountScreenProps> = ({ onNavi
       } else {
         setDevices([]);
       }
+      const session = await appleGetSession();
+      setAppleSession(session);
     } catch (err) {
-      console.error("Error refreshing devices:", err);
+      console.error("Error refreshing devices/session:", err);
     } finally {
       setIsRefreshing(false);
     }
   };
 
+  const handleOpenLogin = () => {
+    setAuthStep("credentials");
+    setEmail("");
+    setPassword("");
+    setTwoFaCode("");
+    setAuthError(null);
+    setIsAuthModalOpen(true);
+  };
+
+  const handleCloseModal = () => {
+    if (authLoading) return;
+    setIsAuthModalOpen(false);
+    setAuthError(null);
+    setPassword("");
+    setTwoFaCode("");
+  };
+
+  const handleSignInSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!email.trim() || !password.trim()) {
+      setAuthError("Please provide both Apple ID email and password.");
+      return;
+    }
+
+    setAuthLoading(true);
+    setAuthError(null);
+
+    try {
+      const res = await appleLogin(email.trim(), password);
+      if (res.type === "Success") {
+        setAppleSession(res.data);
+        setIsAuthModalOpen(false);
+        setPassword("");
+      } else if (res.type === "TwoFactorRequired") {
+        setAuthStep("2fa");
+      }
+    } catch (err: unknown) {
+      const msg = typeof err === "string" ? err : (err as Error)?.message || "Failed to sign in to Apple ID";
+      setAuthError(msg);
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleTwoFaSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (twoFaCode.length < 6) {
+      setAuthError("Please enter the complete 6-digit verification code.");
+      return;
+    }
+
+    setAuthLoading(true);
+    setAuthError(null);
+
+    try {
+      const session = await appleSubmit2Fa(twoFaCode.trim());
+      setAppleSession(session);
+      setIsAuthModalOpen(false);
+      setPassword("");
+      setTwoFaCode("");
+    } catch (err: unknown) {
+      const msg = typeof err === "string" ? err : (err as Error)?.message || "Two-factor verification failed";
+      setAuthError(msg);
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await appleLogout();
+      setAppleSession(null);
+    } catch (err) {
+      console.error("Failed to log out:", err);
+    }
+  };
+
   const activeDevice = devices.length > 0 ? devices[0] : null;
+
+  // Calculate certificate days remaining
+  const calculateDaysLeft = (expiryTimestamp?: number): number | null => {
+    if (!expiryTimestamp) return null;
+    const nowSecs = Math.floor(Date.now() / 1000);
+    const diffSecs = expiryTimestamp - nowSecs;
+    return Math.max(0, Math.ceil(diffSecs / 86400));
+  };
+
+  const daysLeft = calculateDaysLeft(appleSession?.cert_expires_at);
 
   return (
     <div className="device-account-screen">
@@ -256,7 +370,7 @@ export const DeviceAccountScreen: React.FC<DeviceAccountScreenProps> = ({ onNavi
             <div className="account-details">
               <div className="detail-row">
                 <span className="detail-label">Apple ID:</span>
-                <span className="detail-value">{appleSession.apple_id}</span>
+                <span className="detail-value font-mono">{appleSession.apple_id}</span>
               </div>
               <div className="detail-row">
                 <span className="detail-label">Team:</span>
@@ -266,10 +380,41 @@ export const DeviceAccountScreen: React.FC<DeviceAccountScreenProps> = ({ onNavi
               </div>
               <div className="detail-row">
                 <span className="detail-label">Account Tier:</span>
-                <span className="status-pill pill-info">{appleSession.account_type} Account</span>
+                <span
+                  className={`tier-badge ${
+                    appleSession.account_type === "Paid" ? "paid" : "free"
+                  }`}
+                >
+                  {appleSession.account_type} Account
+                </span>
               </div>
-              <button type="button" className="btn btn-outline btn-sm mt-3">
-                {STRINGS.device.logoutBtn}
+
+              {appleSession.cert_expires_at && daysLeft !== null && (
+                <div className="detail-row">
+                  <span className="detail-label">Certificate Status:</span>
+                  <span
+                    className={`cert-expiry-pill ${
+                      daysLeft > 2 ? "valid" : "expiring-soon"
+                    }`}
+                  >
+                    <Calendar size={12} style={{ display: "inline", marginRight: "4px" }} />
+                    {daysLeft > 0
+                      ? `${daysLeft} days remaining (${new Date(
+                          appleSession.cert_expires_at * 1000
+                        ).toLocaleDateString()})`
+                      : "Expired"}
+                  </span>
+                </div>
+              )}
+
+              <button
+                type="button"
+                className="btn btn-outline btn-sm mt-3"
+                onClick={handleLogout}
+                style={{ display: "inline-flex", gap: "0.4rem", alignItems: "center" }}
+              >
+                <LogOut size={14} />
+                <span>{STRINGS.device.logoutBtn}</span>
               </button>
             </div>
           ) : (
@@ -279,22 +424,54 @@ export const DeviceAccountScreen: React.FC<DeviceAccountScreenProps> = ({ onNavi
               <button
                 type="button"
                 className="btn btn-primary btn-sm mt-2"
-                onClick={() => alert("Apple ID authentication will be active in Milestone 3.")}
+                onClick={handleOpenLogin}
               >
                 {STRINGS.device.loginBtn}
               </button>
             </div>
           )}
 
-          <div className="account-limits-box">
+          {/* Honest Account Limits Disclosure */}
+          <div className="account-limits-box mt-4">
             <ShieldAlert size={16} className="text-info shrink-0 mt-0.5" />
             <div className="limits-text">
-              <strong>Account Limits (Free Tier):</strong>
-              <ul>
-                <li>7-day certificate validity period.</li>
-                <li>Maximum 3 active sideloaded apps per device.</li>
-                <li>~10 App IDs generated per week.</li>
-              </ul>
+              {appleSession?.account_type === "Paid" ? (
+                <>
+                  <strong>{STRINGS.device.auth.paidLimitsTitle}</strong>
+                  <div className="limits-item">
+                    <CheckCircle2 size={13} className="text-success shrink-0 mt-0.5" />
+                    <span>{STRINGS.device.auth.paidLimit1}</span>
+                  </div>
+                  <div className="limits-item">
+                    <CheckCircle2 size={13} className="text-success shrink-0 mt-0.5" />
+                    <span>{STRINGS.device.auth.paidLimit2}</span>
+                  </div>
+                  <div className="limits-item">
+                    <CheckCircle2 size={13} className="text-success shrink-0 mt-0.5" />
+                    <span>{STRINGS.device.auth.paidLimit3}</span>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <strong>{STRINGS.device.auth.freeLimitsTitle}</strong>
+                  <div className="limits-item">
+                    <Info size={13} className="text-muted shrink-0 mt-0.5" />
+                    <span>{STRINGS.device.auth.freeLimit1}</span>
+                  </div>
+                  <div className="limits-item">
+                    <Info size={13} className="text-muted shrink-0 mt-0.5" />
+                    <span>{STRINGS.device.auth.freeLimit2}</span>
+                  </div>
+                  <div className="limits-item">
+                    <Info size={13} className="text-muted shrink-0 mt-0.5" />
+                    <span>{STRINGS.device.auth.freeLimit3}</span>
+                  </div>
+                  <div className="limits-item">
+                    <Info size={13} className="text-muted shrink-0 mt-0.5" />
+                    <span>{STRINGS.device.auth.freeLimit4}</span>
+                  </div>
+                </>
+              )}
             </div>
           </div>
         </section>
@@ -309,6 +486,164 @@ export const DeviceAccountScreen: React.FC<DeviceAccountScreenProps> = ({ onNavi
           <div className="installed-apps-table"></div>
         )}
       </section>
+
+      {/* Apple ID Sign-In & 2FA Modal */}
+      {isAuthModalOpen && (
+        <div className="modal-overlay" role="dialog" aria-modal="true">
+          <div className="modal-card">
+            <div className="modal-header">
+              <h3 className="modal-title">
+                {authStep === "credentials"
+                  ? STRINGS.device.auth.signInTitle
+                  : STRINGS.device.auth.twoFactorTitle}
+              </h3>
+              <button
+                type="button"
+                className="modal-close-btn"
+                onClick={handleCloseModal}
+                disabled={authLoading}
+                aria-label="Close"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {authStep === "credentials" ? (
+              <form onSubmit={handleSignInSubmit}>
+                <div className="modal-body">
+                  <div className="auth-security-notice">
+                    <ShieldCheck size={20} className="text-accent shrink-0 mt-0.5" />
+                    <span>{STRINGS.device.auth.privacyNotice}</span>
+                  </div>
+
+                  {authError && (
+                    <div className="status-notice notice-danger">
+                      <AlertTriangle size={16} className="shrink-0" />
+                      <span>{authError}</span>
+                    </div>
+                  )}
+
+                  <div className="form-group">
+                    <label className="form-label" htmlFor="apple-id-input">
+                      {STRINGS.device.auth.emailLabel}
+                    </label>
+                    <input
+                      id="apple-id-input"
+                      type="email"
+                      className="form-input"
+                      placeholder={STRINGS.device.auth.emailPlaceholder}
+                      value={email}
+                      onChange={(e) => setEmail(e.target.value)}
+                      disabled={authLoading}
+                      required
+                      autoFocus
+                    />
+                  </div>
+
+                  <div className="form-group">
+                    <label className="form-label" htmlFor="apple-password-input">
+                      {STRINGS.device.auth.passwordLabel}
+                    </label>
+                    <input
+                      id="apple-password-input"
+                      type="password"
+                      className="form-input"
+                      placeholder={STRINGS.device.auth.passwordPlaceholder}
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      disabled={authLoading}
+                      required
+                    />
+                  </div>
+                </div>
+
+                <div className="modal-footer">
+                  <button
+                    type="button"
+                    className="btn btn-outline btn-sm"
+                    onClick={handleCloseModal}
+                    disabled={authLoading}
+                  >
+                    {STRINGS.device.auth.cancelBtn}
+                  </button>
+                  <button
+                    type="submit"
+                    className="btn btn-primary btn-sm"
+                    disabled={authLoading}
+                    style={{ display: "inline-flex", gap: "0.4rem", alignItems: "center" }}
+                  >
+                    {authLoading && <RefreshCw size={14} className="spin-icon" />}
+                    <span>
+                      {authLoading
+                        ? STRINGS.device.auth.signingIn
+                        : STRINGS.device.auth.signInBtn}
+                    </span>
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <form onSubmit={handleTwoFaSubmit}>
+                <div className="modal-body">
+                  <p className="text-sm text-muted">
+                    {STRINGS.device.auth.twoFactorPrompt}
+                  </p>
+
+                  {authError && (
+                    <div className="status-notice notice-danger">
+                      <AlertTriangle size={16} className="shrink-0" />
+                      <span>{authError}</span>
+                    </div>
+                  )}
+
+                  <div className="form-group">
+                    <input
+                      id="twofa-code-input"
+                      type="text"
+                      className="form-input code-input"
+                      placeholder="······"
+                      maxLength={6}
+                      value={twoFaCode}
+                      onChange={(e) =>
+                        setTwoFaCode(e.target.value.replace(/\D/g, "").slice(0, 6))
+                      }
+                      disabled={authLoading}
+                      required
+                      autoFocus
+                    />
+                  </div>
+                </div>
+
+                <div className="modal-footer">
+                  <button
+                    type="button"
+                    className="btn btn-outline btn-sm"
+                    onClick={() => {
+                      setAuthStep("credentials");
+                      setAuthError(null);
+                    }}
+                    disabled={authLoading}
+                  >
+                    Back
+                  </button>
+                  <button
+                    type="submit"
+                    className="btn btn-primary btn-sm"
+                    disabled={authLoading || twoFaCode.length < 6}
+                    style={{ display: "inline-flex", gap: "0.4rem", alignItems: "center" }}
+                  >
+                    {authLoading && <RefreshCw size={14} className="spin-icon" />}
+                    <span>
+                      {authLoading
+                        ? STRINGS.device.auth.verifying
+                        : STRINGS.device.auth.verifyBtn}
+                    </span>
+                  </button>
+                </div>
+              </form>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 };
