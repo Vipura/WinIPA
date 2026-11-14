@@ -245,6 +245,46 @@ pub async fn query_device_info(
     Ok(device_info)
 }
 
+/// Starts an isolated lockdown service (such as com.apple.afc or com.apple.mobile.installation_proxy)
+/// and returns the allocated port number on the device.
+pub async fn start_lockdown_service(
+    stream: &mut TcpStream,
+    service_name: &str,
+) -> Result<u16, WinIpaError> {
+    let xml = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Request</key>
+    <string>StartService</string>
+    <key>Service</key>
+    <string>{service_name}</string>
+    <key>Label</key>
+    <string>WinIPA</string>
+</dict>
+</plist>"#
+    );
+
+    send_lockdown_message(stream, &xml).await?;
+    let resp = read_lockdown_message(stream).await?;
+
+    if let Some(dict) = resp.as_dictionary() {
+        if let Some(err) = dict.get("Error").and_then(|v| v.as_string()) {
+            return Err(WinIpaError::InstallFailed(format!(
+                "Failed to start service {service_name}: {err}"
+            )));
+        }
+        if let Some(port) = dict.get("Port").and_then(|v| v.as_signed_integer()) {
+            return Ok(port as u16);
+        }
+    }
+
+    Err(WinIpaError::InstallFailed(format!(
+        "Invalid response starting service {service_name}"
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

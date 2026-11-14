@@ -15,7 +15,9 @@ use apple::{get_apple_service, AppleSessionInfo};
 use device::{check_driver, list_devices, start_device_monitor, DeviceDriverStatus, DeviceInfo};
 use errors::WinIpaError;
 use ipa::IpaMetadata;
+use pipeline::{cancel_active_pipeline, execute_pipeline, PipelineRequest, PipelineResult};
 use std::path::Path;
+use store::{load_installed_apps, remove_installed_app as store_remove_app, InstalledAppRecord};
 
 #[tauri::command]
 fn get_app_version() -> &'static str {
@@ -98,6 +100,29 @@ async fn apple_provision_device(
         .await
 }
 
+#[tauri::command]
+async fn start_installation_pipeline(
+    app: tauri::AppHandle,
+    req: PipelineRequest,
+) -> Result<PipelineResult, WinIpaError> {
+    execute_pipeline(Some(app), req).await
+}
+
+#[tauri::command]
+fn cancel_installation_pipeline() {
+    cancel_active_pipeline();
+}
+
+#[tauri::command]
+fn get_installed_apps() -> Result<Vec<InstalledAppRecord>, WinIpaError> {
+    load_installed_apps()
+}
+
+#[tauri::command]
+fn remove_installed_app(bundle_id: String) -> Result<(), WinIpaError> {
+    store_remove_app(&bundle_id)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -117,7 +142,11 @@ pub fn run() {
             apple_submit_2fa,
             apple_get_session,
             apple_logout,
-            apple_provision_device
+            apple_provision_device,
+            start_installation_pipeline,
+            cancel_installation_pipeline,
+            get_installed_apps,
+            remove_installed_app
         ])
         .run(tauri::generate_context!())
         .expect("error while running WinIPA application");

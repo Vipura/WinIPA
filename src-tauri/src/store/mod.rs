@@ -57,3 +57,75 @@ pub fn delete_secret(key: &str) -> Result<(), WinIpaError> {
         ))),
     }
 }
+
+fn get_app_store_path() -> std::path::PathBuf {
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        let dir = std::path::PathBuf::from(appdata).join("WinIPA");
+        let _ = std::fs::create_dir_all(&dir);
+        dir.join("installed_apps.json")
+    } else {
+        std::path::PathBuf::from("installed_apps.json")
+    }
+}
+
+/// Loads all tracked installed sideloaded apps from the local store.
+pub fn load_installed_apps() -> Result<Vec<InstalledAppRecord>, WinIpaError> {
+    let path = get_app_store_path();
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let data = std::fs::read(&path).map_err(|e| WinIpaError::Unknown {
+        message: format!("Failed to read installed apps database: {e}"),
+        diagnostics: None,
+    })?;
+
+    if data.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let records: Vec<InstalledAppRecord> = serde_json::from_slice(&data).unwrap_or_default();
+    Ok(records)
+}
+
+/// Saves an installed app record to the local store (updating existing record if bundle_id matches).
+pub fn save_installed_app(record: InstalledAppRecord) -> Result<(), WinIpaError> {
+    let mut apps = load_installed_apps()?;
+    if let Some(pos) = apps.iter().position(|a| a.bundle_id == record.bundle_id) {
+        apps[pos] = record;
+    } else {
+        apps.push(record);
+    }
+
+    let path = get_app_store_path();
+    let data = serde_json::to_vec_pretty(&apps).map_err(|e| WinIpaError::Unknown {
+        message: format!("Failed to serialize installed apps database: {e}"),
+        diagnostics: None,
+    })?;
+
+    std::fs::write(&path, data).map_err(|e| WinIpaError::Unknown {
+        message: format!("Failed to write installed apps database: {e}"),
+        diagnostics: None,
+    })?;
+
+    Ok(())
+}
+
+/// Removes an app record by its bundle ID.
+pub fn remove_installed_app(bundle_id: &str) -> Result<(), WinIpaError> {
+    let mut apps = load_installed_apps()?;
+    apps.retain(|a| a.bundle_id != bundle_id);
+
+    let path = get_app_store_path();
+    let data = serde_json::to_vec_pretty(&apps).map_err(|e| WinIpaError::Unknown {
+        message: format!("Failed to serialize installed apps database: {e}"),
+        diagnostics: None,
+    })?;
+
+    std::fs::write(&path, data).map_err(|e| WinIpaError::Unknown {
+        message: format!("Failed to write installed apps database: {e}"),
+        diagnostics: None,
+    })?;
+
+    Ok(())
+}
