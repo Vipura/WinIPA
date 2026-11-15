@@ -1,6 +1,6 @@
 [package]
 name = "winipa"
-version = "0.1.11"
+version = "0.1.12"
 description = "Test iOS apps on iPhone from Windows without a Mac"
 authors = ["WinIPA Contributors"]
 edition = "2021"

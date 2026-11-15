@@ -765,6 +765,54 @@ ${fullSystemReport}`;
                   )}
                 </div>
               )}
+
+            {pipelineError &&
+              (pipelineError.includes("3018") ||
+                pipelineError.includes("Xcode 7.3") ||
+                pipelineError.toLowerCase().includes("two-factor")) && (
+                <div
+                  className="twofa-refresh-box mt-3 p-3 rounded"
+                  style={{
+                    background: "rgba(59, 130, 246, 0.08)",
+                    border: "1px solid rgba(59, 130, 246, 0.3)",
+                    borderRadius: "8px",
+                    padding: "1rem",
+                  }}
+                >
+                  <h4
+                    style={{
+                      fontWeight: 600,
+                      fontSize: "0.95rem",
+                      color: "var(--accent)",
+                      marginBottom: "0.4rem",
+                    }}
+                  >
+                    Apple 2FA Authentication Refresh Required
+                  </h4>
+                  <p
+                    style={{
+                      fontSize: "0.85rem",
+                      opacity: 0.9,
+                      marginBottom: "0.8rem",
+                      lineHeight: 1.4,
+                    }}
+                  >
+                    Apple Developer Services requires an active two-factor authentication session token to generate certificates and provisioning profiles. Click below to re-authenticate with your 6-digit 2FA code. Your Personal Team ID (H2834KURW4) is preserved automatically.
+                  </p>
+                  <button
+                    type="button"
+                    className="btn btn-primary btn-sm"
+                    onClick={async () => {
+                      await handleLogout();
+                      onNavigate("device-account");
+                    }}
+                    style={{ display: "inline-flex", gap: "0.4rem", alignItems: "center" }}
+                  >
+                    <LogOut size={14} />
+                    <span>Log Out &amp; Sign In Again</span>
+                  </button>
+                </div>
+              )}
           </div>
 
           <div className="error-card-actions">

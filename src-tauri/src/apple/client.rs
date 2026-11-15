@@ -410,12 +410,24 @@ impl AppleDeveloperClient {
             }
         })?;
 
+        // Ensure session_token_header is restored from vault if not currently in memory
+        if let Ok(mut guard) = self.session_token_header.lock() {
+            if guard.is_none() {
+                if let Ok(Some(apple_id)) = get_secret("active_apple_id") {
+                    if let Ok(Some(st)) = get_secret(&format!("token_header:{apple_id}")) {
+                        *guard = Some(st);
+                    }
+                }
+            }
+        }
+
         let mut req = self
             .http_client
             .post(&url)
             .header("Content-Type", "text/x-xml-plist")
             .header("Accept", "text/x-xml-plist")
             .header("User-Agent", "Xcode/15.2 (15C500b)")
+            .header("X-Xcode-Version", "15.2 (15C500b)")
             .header("Connection", "close")
             .header("Cookie", format!("myacinfo={token}"))
             .body(body_bytes);
@@ -545,6 +557,20 @@ impl AppleDeveloperClient {
                                 "Apple developer session expired. Please click 'Sign Out' in Device & Account and log in again.".into(),
                             ))
                         }
+                        3018 => {
+                            if let Ok(mut lock) = self.session_token.lock() {
+                                *lock = None;
+                            }
+                            if let Ok(mut lock) = self.session_token_header.lock() {
+                                *lock = None;
+                            }
+                            if let Ok(Some(apple_id)) = get_secret("active_apple_id") {
+                                let _ = delete_secret(&format!("token_header:{apple_id}"));
+                            }
+                            Err(WinIpaError::AppleAuthFailed(
+                                "Your Apple Developer session requires two-factor authentication refresh (Apple error 3018). Please click 'Log Out' in the top bar, then sign in with your Apple ID and enter the 2FA code to refresh your session.".into(),
+                            ))
+                        }
                         3038 | 3041 => Err(WinIpaError::AppleRateLimited),
                         3050 => Err(WinIpaError::AppleAuthFailed(
                             "Apple Developer error 3050 (Please select a team): No active developer team was found for this Apple ID. If this is a new Apple ID, please sign in once to https://developer.apple.com/account in your web browser, accept the free Apple Developer Agreement to activate your Personal Team, then click Try Again.".into(),
@@ -615,11 +641,23 @@ impl AppleDeveloperClient {
                 let (tid, tname, acct) = teams.into_iter().next().unwrap();
                 (tid, tname, acct)
             }
-            _ => (
-                "PERSONAL".to_string(),
-                format!("{apple_id} (Personal Team)"),
-                AppleAccountType::Free,
-            ),
+            _ => {
+                if let Ok(Some(saved_tid)) = get_secret(&format!("saved_team:{apple_id}")) {
+                    let clean = saved_tid.trim().to_uppercase();
+                    if clean.len() == 10 {
+                        return (
+                            clean,
+                            format!("{apple_id} (Personal Team)"),
+                            AppleAccountType::Free,
+                        );
+                    }
+                }
+                (
+                    "PERSONAL".to_string(),
+                    format!("{apple_id} (Personal Team)"),
+                    AppleAccountType::Free,
+                )
+            }
         }
     }
 }
@@ -813,6 +851,7 @@ impl AppleService for AppleDeveloperClient {
             if let Ok(mut lock) = self.session_token_header.lock() {
                 *lock = Some(st.to_string());
             }
+            let _ = store_secret(&format!("token_header:{apple_id}"), st);
         }
 
         let token_opt = extract_apple_session_token(&comp_headers, None)
@@ -979,6 +1018,7 @@ impl AppleService for AppleDeveloperClient {
             if let Ok(mut lock) = self.session_token_header.lock() {
                 *lock = Some(st.clone());
             }
+            let _ = store_secret(&format!("token_header:{apple_id}"), st);
         }
 
         // Send trust request to establish persistent session cookies (Fastlane store_session / 2sv/trust)
@@ -1083,10 +1123,17 @@ impl AppleService for AppleDeveloperClient {
 
         // Check persistent store for stored session
         if let Ok(Some(apple_id)) = get_secret("active_apple_id") {
-            // Restore session token
+            // Restore session token (myacinfo)
             if let Ok(Some(token)) = get_secret(&format!("session:{apple_id}")) {
                 if let Ok(mut guard) = self.session_token.lock() {
                     *guard = Some(token);
+                }
+            }
+
+            // Restore 2FA session token header (x-apple-session-token)
+            if let Ok(Some(st)) = get_secret(&format!("token_header:{apple_id}")) {
+                if let Ok(mut guard) = self.session_token_header.lock() {
+                    *guard = Some(st);
                 }
             }
 
@@ -1096,7 +1143,7 @@ impl AppleService for AppleDeveloperClient {
                 return Ok(None);
             }
 
-            let session_info = if let Ok(Some(info_json)) = get_secret(&format!("info:{apple_id}"))
+            let mut session_info = if let Ok(Some(info_json)) = get_secret(&format!("info:{apple_id}"))
             {
                 serde_json::from_str::<AppleSessionInfo>(&info_json).unwrap_or_else(|_| {
                     AppleSessionInfo {
@@ -1129,6 +1176,16 @@ impl AppleService for AppleDeveloperClient {
                 }
             };
 
+            // If team_id is PERSONAL or empty, restore saved_team if present
+            if session_info.team_id == "PERSONAL" || session_info.team_id.is_empty() {
+                if let Ok(Some(saved_tid)) = get_secret(&format!("saved_team:{apple_id}")) {
+                    let clean = saved_tid.trim().to_uppercase();
+                    if clean.len() == 10 {
+                        session_info.team_id = clean;
+                    }
+                }
+            }
+
             if let Ok(mut guard) = self.session.lock() {
                 *guard = Some(session_info.clone());
             }
@@ -1142,12 +1199,14 @@ impl AppleService for AppleDeveloperClient {
     async fn logout(&mut self) -> Result<(), WinIpaError> {
         if let Ok(Some(apple_id)) = get_secret("active_apple_id") {
             let _ = delete_secret(&format!("session:{apple_id}"));
+            let _ = delete_secret(&format!("token_header:{apple_id}"));
             let _ = delete_secret(&format!("auth:{apple_id}"));
             let _ = delete_secret(&format!("info:{apple_id}"));
         }
         if let Ok(guard) = self.session.lock() {
             if let Some(ref s) = *guard {
                 let _ = delete_secret(&format!("session:{}", s.apple_id));
+                let _ = delete_secret(&format!("token_header:{}", s.apple_id));
                 let _ = delete_secret(&format!("auth:{}", s.apple_id));
                 let _ = delete_secret(&format!("info:{}", s.apple_id));
             }
@@ -1158,6 +1217,9 @@ impl AppleService for AppleDeveloperClient {
             *guard = None;
         }
         if let Ok(mut guard) = self.session_token.lock() {
+            *guard = None;
+        }
+        if let Ok(mut guard) = self.session_token_header.lock() {
             *guard = None;
         }
         self.pending_apple_id = None;
@@ -1503,6 +1565,7 @@ impl AppleService for AppleDeveloperClient {
         if let Ok(info_json) = serde_json::to_string(&session_info) {
             let _ = store_secret(&format!("info:{apple_id}"), &info_json);
         }
+        let _ = store_secret(&format!("saved_team:{apple_id}"), &team_id_clean);
 
         Ok(session_info)
     }
