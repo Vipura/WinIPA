@@ -274,6 +274,55 @@ impl AppleDeveloperClient {
         "PERSONAL".to_string()
     }
 
+    /// Resolves active team ID, querying developer API if stored value is placeholder or missing.
+    async fn resolve_team_id(&self) -> Result<String, WinIpaError> {
+        let current = self.get_current_team_id();
+        if current != "PERSONAL" && !current.is_empty() {
+            return Ok(current);
+        }
+
+        // Attempt to fetch real team from Developer API
+        if let Ok(teams) = self.fetch_teams().await {
+            if let Some((tid, tname, acct)) = teams.into_iter().next() {
+                if !tid.is_empty() && tid != "PERSONAL" {
+                    // Update session in memory and vault
+                    if let Ok(mut guard) = self.session.lock() {
+                        if let Some(ref mut s) = *guard {
+                            s.team_id = tid.clone();
+                            s.team_name = tname.clone();
+                            s.account_type = acct;
+                            if let Ok(info_json) = serde_json::to_string(s) {
+                                let _ = store_secret(&format!("info:{}", s.apple_id), &info_json);
+                            }
+                        }
+                    } else if let Ok(Some(apple_id)) = get_secret("active_apple_id") {
+                        let new_info = AppleSessionInfo {
+                            apple_id: apple_id.clone(),
+                            team_id: tid.clone(),
+                            team_name: tname,
+                            account_type: acct,
+                            cert_expires_at: Some(
+                                std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs()
+                                    + 7 * 86400,
+                            ),
+                        };
+                        if let Ok(info_json) = serde_json::to_string(&new_info) {
+                            let _ = store_secret(&format!("info:{apple_id}"), &info_json);
+                        }
+                    }
+                    return Ok(tid);
+                }
+            }
+        }
+
+        Err(WinIpaError::AppleAuthFailed(
+            "Apple Developer error 3050 (Please select a team): No active developer team was found for this Apple ID. If this is a new Apple ID, please sign in once to https://developer.apple.com/account in your web browser, accept the free Apple Developer Agreement to activate your Personal Team, then click Try Again.".into(),
+        ))
+    }
+
     /// Builds standard Apple headers with Anisette machine telemetry.
     async fn build_apple_headers(&self) -> Result<HeaderMap, WinIpaError> {
         let mut headers = HeaderMap::new();
@@ -497,6 +546,9 @@ impl AppleDeveloperClient {
                             ))
                         }
                         3038 | 3041 => Err(WinIpaError::AppleRateLimited),
+                        3050 => Err(WinIpaError::AppleAuthFailed(
+                            "Apple Developer error 3050 (Please select a team): No active developer team was found for this Apple ID. If this is a new Apple ID, please sign in once to https://developer.apple.com/account in your web browser, accept the free Apple Developer Agreement to activate your Personal Team, then click Try Again.".into(),
+                        )),
                         _ => Err(WinIpaError::Unknown {
                             message: format!("Apple Developer error {result_code}: {err_string}"),
                             diagnostics: None,
@@ -1127,13 +1179,11 @@ impl AppleService for AppleDeveloperClient {
     }
 
     async fn register_device(&self, udid: &str, name: &str) -> Result<String, WinIpaError> {
-        let team_id = self.get_current_team_id();
+        let team_id = self.resolve_team_id().await?;
         let mut params = HashMap::new();
         params.insert("deviceNumber".into(), udid.to_string());
         params.insert("name".into(), name.to_string());
-        if team_id != "PERSONAL" && !team_id.is_empty() {
-            params.insert("teamId".into(), team_id.clone());
-        }
+        params.insert("teamId".into(), team_id.clone());
 
         let resp_res = self
             .call_developer_api("ios/addDevice.action", &params)
@@ -1144,9 +1194,7 @@ impl AppleService for AppleDeveloperClient {
             Err(e) => {
                 // If device registration fails because it's already registered, query listDevices
                 let mut list_params = HashMap::new();
-                if team_id != "PERSONAL" && !team_id.is_empty() {
-                    list_params.insert("teamId".into(), team_id.clone());
-                }
+                list_params.insert("teamId".into(), team_id.clone());
                 if let Ok(list_resp) = self
                     .call_developer_api("ios/listDevices.action", &list_params)
                     .await
@@ -1192,13 +1240,11 @@ impl AppleService for AppleDeveloperClient {
         bundle_id: &str,
         name: &str,
     ) -> Result<String, WinIpaError> {
-        let team_id = self.get_current_team_id();
+        let team_id = self.resolve_team_id().await?;
         let mut params = HashMap::new();
         params.insert("identifier".into(), bundle_id.to_string());
         params.insert("name".into(), format!("WinIPA {name}"));
-        if team_id != "PERSONAL" && !team_id.is_empty() {
-            params.insert("teamId".into(), team_id.clone());
-        }
+        params.insert("teamId".into(), team_id.clone());
 
         let resp_res = self
             .call_developer_api("ios/addAppId.action", &params)
@@ -1209,9 +1255,7 @@ impl AppleService for AppleDeveloperClient {
             Err(e) => {
                 // If App ID registration fails because it's already registered, query listAppIds
                 let mut list_params = HashMap::new();
-                if team_id != "PERSONAL" && !team_id.is_empty() {
-                    list_params.insert("teamId".into(), team_id.clone());
-                }
+                list_params.insert("teamId".into(), team_id.clone());
                 if let Ok(list_resp) = self
                     .call_developer_api("ios/listAppIds.action", &list_params)
                     .await
@@ -1252,14 +1296,12 @@ impl AppleService for AppleDeveloperClient {
     }
 
     async fn request_development_certificate(&self) -> Result<DevelopmentCertificate, WinIpaError> {
-        let team_id = self.get_current_team_id();
+        let team_id = self.resolve_team_id().await?;
         let key_pair = generate_dev_csr("Apple Development: WinIPA User", &team_id)?;
 
         let mut params = HashMap::new();
         params.insert("csrContent".into(), key_pair.csr_pem.clone());
-        if team_id != "PERSONAL" && !team_id.is_empty() {
-            params.insert("teamId".into(), team_id.clone());
-        }
+        params.insert("teamId".into(), team_id.clone());
 
         let resp_res = self
             .call_developer_api("ios/submitDevelopmentCSR.action", &params)
@@ -1274,9 +1316,7 @@ impl AppleService for AppleDeveloperClient {
                 {
                     // Query existing certificates, revoke stale cert, and retry CSR submission
                     let mut list_params = HashMap::new();
-                    if team_id != "PERSONAL" && !team_id.is_empty() {
-                        list_params.insert("teamId".into(), team_id.clone());
-                    }
+                    list_params.insert("teamId".into(), team_id.clone());
                     if let Ok(list_resp) = self
                         .call_developer_api("ios/listAllDevelopmentCerts.action", &list_params)
                         .await
@@ -1292,9 +1332,7 @@ impl AppleService for AppleDeveloperClient {
                                             let mut rev_params = HashMap::new();
                                             rev_params
                                                 .insert("serialNumber".into(), serial.to_string());
-                                            if team_id != "PERSONAL" && !team_id.is_empty() {
-                                                rev_params.insert("teamId".into(), team_id.clone());
-                                            }
+                                            rev_params.insert("teamId".into(), team_id.clone());
                                             let _ = self
                                                 .call_developer_api(
                                                     "ios/revokeDevelopmentCert.action",
@@ -1364,14 +1402,12 @@ impl AppleService for AppleDeveloperClient {
         device_id: &str,
         cert_id: &str,
     ) -> Result<ProvisioningProfile, WinIpaError> {
-        let team_id = self.get_current_team_id();
+        let team_id = self.resolve_team_id().await?;
         let mut params = HashMap::new();
         params.insert("appIdId".into(), app_id_id.to_string());
         params.insert("deviceId".into(), device_id.to_string());
         params.insert("certificateId".into(), cert_id.to_string());
-        if team_id != "PERSONAL" && !team_id.is_empty() {
-            params.insert("teamId".into(), team_id);
-        }
+        params.insert("teamId".into(), team_id);
 
         let resp = self
             .call_developer_api("ios/downloadTeamProvisioningProfile.action", &params)
