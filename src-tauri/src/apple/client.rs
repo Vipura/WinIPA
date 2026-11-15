@@ -757,12 +757,12 @@ impl AppleDeveloperClient {
             WinIpaError::AppleAuthFailed(format!("Failed to parse re-login SRP init: {e}"))
         })?;
 
-        let salt_bytes = BASE64.decode(&srp_init.salt).map_err(|e| {
-            WinIpaError::AppleAuthFailed(format!("Invalid re-login SRP salt: {e}"))
-        })?;
-        let b_bytes = BASE64.decode(&srp_init.b).map_err(|e| {
-            WinIpaError::AppleAuthFailed(format!("Invalid re-login SRP b: {e}"))
-        })?;
+        let salt_bytes = BASE64
+            .decode(&srp_init.salt)
+            .map_err(|e| WinIpaError::AppleAuthFailed(format!("Invalid re-login SRP salt: {e}")))?;
+        let b_bytes = BASE64
+            .decode(&srp_init.b)
+            .map_err(|e| WinIpaError::AppleAuthFailed(format!("Invalid re-login SRP b: {e}")))?;
 
         let (m1_b64, m2_b64) = srp_client.compute_proofs(
             apple_id,
@@ -813,7 +813,8 @@ impl AppleDeveloperClient {
         // 200 means success without 2FA (device is trusted), 409 means 2FA still needed (unexpected)
         if comp_status.as_u16() == 409 {
             return Err(WinIpaError::AppleAuthFailed(
-                "2FA re-required after trust (unexpected). Please try signing out and in again.".into(),
+                "2FA re-required after trust (unexpected). Please try signing out and in again."
+                    .into(),
             ));
         }
         if !comp_status.is_success() {
@@ -1369,9 +1370,24 @@ impl AppleService for AppleDeveloperClient {
                 return Ok(None);
             }
 
-            let mut session_info = if let Ok(Some(info_json)) = get_secret(&format!("info:{apple_id}"))
-            {
-                serde_json::from_str::<AppleSessionInfo>(&info_json).unwrap_or_else(|_| {
+            let mut session_info =
+                if let Ok(Some(info_json)) = get_secret(&format!("info:{apple_id}")) {
+                    serde_json::from_str::<AppleSessionInfo>(&info_json).unwrap_or_else(|_| {
+                        AppleSessionInfo {
+                            apple_id: apple_id.clone(),
+                            team_id: "PERSONAL".to_string(),
+                            team_name: format!("{apple_id} (Personal Team)"),
+                            account_type: AppleAccountType::Free,
+                            cert_expires_at: Some(
+                                std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs()
+                                    + 7 * 86400,
+                            ),
+                        }
+                    })
+                } else {
                     AppleSessionInfo {
                         apple_id: apple_id.clone(),
                         team_id: "PERSONAL".to_string(),
@@ -1385,22 +1401,7 @@ impl AppleService for AppleDeveloperClient {
                                 + 7 * 86400,
                         ),
                     }
-                })
-            } else {
-                AppleSessionInfo {
-                    apple_id: apple_id.clone(),
-                    team_id: "PERSONAL".to_string(),
-                    team_name: format!("{apple_id} (Personal Team)"),
-                    account_type: AppleAccountType::Free,
-                    cert_expires_at: Some(
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs()
-                            + 7 * 86400,
-                    ),
-                }
-            };
+                };
 
             // If team_id is PERSONAL or empty, restore saved_team if present
             if session_info.team_id == "PERSONAL" || session_info.team_id.is_empty() {
@@ -1762,7 +1763,9 @@ impl AppleService for AppleDeveloperClient {
         }
         .or_else(|| get_secret("active_apple_id").ok().flatten())
         .ok_or_else(|| {
-            WinIpaError::AppleAuthFailed("No active Apple ID session found. Please log in first.".into())
+            WinIpaError::AppleAuthFailed(
+                "No active Apple ID session found. Please log in first.".into(),
+            )
         })?;
 
         let mut updated_session: Option<AppleSessionInfo> = None;

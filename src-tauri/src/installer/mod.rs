@@ -52,7 +52,8 @@ impl IdeviceProvider for WinIpaDeviceProvider {
     fn connect(
         &self,
         port: u16,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Idevice, IdeviceError>> + Send>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Idevice, IdeviceError>> + Send>>
+    {
         self.inner.connect(port)
     }
 
@@ -62,7 +63,9 @@ impl IdeviceProvider for WinIpaDeviceProvider {
 
     fn get_pairing_file(
         &self,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<PairingFile, IdeviceError>> + Send>> {
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<PairingFile, IdeviceError>> + Send>,
+    > {
         let inner = self.inner.clone();
         let udid = self.inner.udid.clone();
         Box::pin(async move {
@@ -76,9 +79,18 @@ impl IdeviceProvider for WinIpaDeviceProvider {
             {
                 let candidates = [
                     format!(r"C:\ProgramData\Apple\Lockdown\{udid}.plist"),
-                    format!(r"C:\ProgramData\Apple\Lockdown\{}.plist", udid.replace('-', "")),
-                    format!(r"C:\ProgramData\Apple\Lockdown\{}.plist", udid.to_uppercase()),
-                    format!(r"C:\ProgramData\Apple\Lockdown\{}.plist", udid.to_lowercase()),
+                    format!(
+                        r"C:\ProgramData\Apple\Lockdown\{}.plist",
+                        udid.replace('-', "")
+                    ),
+                    format!(
+                        r"C:\ProgramData\Apple\Lockdown\{}.plist",
+                        udid.to_uppercase()
+                    ),
+                    format!(
+                        r"C:\ProgramData\Apple\Lockdown\{}.plist",
+                        udid.to_lowercase()
+                    ),
                 ];
                 for path in &candidates {
                     if let Ok(pf) = PairingFile::read_from_file(path) {
@@ -155,7 +167,10 @@ impl InstallerService for DeviceUsbInstaller {
             }
         };
 
-        report(0.0, "Establishing authenticated lockdown session with iPhone...");
+        report(
+            0.0,
+            "Establishing authenticated lockdown session with iPhone...",
+        );
 
         // 2. Setup provider with Windows pairing file support
         let usbmuxd_provider = UsbmuxdProvider {
@@ -186,9 +201,9 @@ impl InstallerService for DeviceUsbInstaller {
             })?;
 
         // 4. Stream upload IPA to device PublicStaging
-        let file_bytes = tokio::fs::read(signed_ipa_path).await.map_err(|e| {
-            WinIpaError::InvalidIpa(format!("Failed to read signed IPA file: {e}"))
-        })?;
+        let file_bytes = tokio::fs::read(signed_ipa_path)
+            .await
+            .map_err(|e| WinIpaError::InvalidIpa(format!("Failed to read signed IPA file: {e}")))?;
         let total_bytes = file_bytes.len();
         let total_mb = total_bytes as f64 / (1024.0 * 1024.0);
         let chunk_size = 256 * 1024; // 256 KB chunks

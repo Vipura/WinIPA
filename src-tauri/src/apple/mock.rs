@@ -162,7 +162,9 @@ impl AppleService for MockAppleService {
             return Ok(session.clone());
         }
 
-        Err(WinIpaError::AppleAuthFailed("No active session to update Team ID".into()))
+        Err(WinIpaError::AppleAuthFailed(
+            "No active session to update Team ID".into(),
+        ))
     }
 }
 
@@ -282,7 +284,10 @@ mod tests {
     #[tokio::test]
     async fn test_mock_set_team_id() {
         let mut service = MockAppleService::default();
-        let _ = service.login("developer@example.com", "valid_password").await.unwrap();
+        let _ = service
+            .login("developer@example.com", "valid_password")
+            .await
+            .unwrap();
 
         // Invalid length
         let err = service.set_team_id("TOO_SHORT").await.unwrap_err();

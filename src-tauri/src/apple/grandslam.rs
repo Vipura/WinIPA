@@ -47,6 +47,12 @@ pub struct GrandSlamAppleClient {
     pending_2fa: TokioMutex<Option<Pending2FASession>>,
 }
 
+impl Default for GrandSlamAppleClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GrandSlamAppleClient {
     pub fn new() -> Self {
         Self {
@@ -107,7 +113,10 @@ impl GrandSlamAppleClient {
         ))
     }
 
-    async fn get_current_team(&self, dev_session: &mut DeveloperSession) -> Result<DeveloperTeam, WinIpaError> {
+    async fn get_current_team(
+        &self,
+        dev_session: &mut DeveloperSession,
+    ) -> Result<DeveloperTeam, WinIpaError> {
         let teams = dev_session.list_teams().await.map_err(|e| {
             WinIpaError::AppleAuthFailed(format!("Failed to list Apple Developer teams: {e}"))
         })?;
@@ -119,26 +128,28 @@ impl GrandSlamAppleClient {
         }
 
         // Match by saved team if available
-        let saved_team_id = self
-            .session_info
-            .lock()
-            .unwrap()
-            .as_ref()
-            .map(|s| s.team_id.clone())
-            .or_else(|| {
-                get_secret("active_apple_id").ok().flatten().and_then(|id| {
-                    get_secret(&format!("saved_team:{id}"))
-                        .ok()
-                        .flatten()
-                        .or_else(|| {
-                            get_secret(&format!("info:{id}")).ok().flatten().and_then(|info_str| {
-                                serde_json::from_str::<AppleSessionInfo>(&info_str)
-                                    .ok()
-                                    .map(|s| s.team_id)
+        let saved_team_id =
+            self.session_info
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|s| s.team_id.clone())
+                .or_else(|| {
+                    get_secret("active_apple_id").ok().flatten().and_then(|id| {
+                        get_secret(&format!("saved_team:{id}"))
+                            .ok()
+                            .flatten()
+                            .or_else(|| {
+                                get_secret(&format!("info:{id}")).ok().flatten().and_then(
+                                    |info_str| {
+                                        serde_json::from_str::<AppleSessionInfo>(&info_str)
+                                            .ok()
+                                            .map(|s| s.team_id)
+                                    },
+                                )
                             })
-                        })
-                })
-            });
+                    })
+                });
 
         if let Some(target_id) = saved_team_id {
             if let Some(t) = teams.iter().find(|t| t.team_id == target_id) {
@@ -280,8 +291,11 @@ impl AppleService for GrandSlamAppleClient {
                     }
                     if let Some(ref spd) = account.spd {
                         let mut spd_bytes = Vec::new();
-                        if plist::to_writer_xml(&mut spd_bytes, &plist::Value::Dictionary(spd.clone()))
-                            .is_ok()
+                        if plist::to_writer_xml(
+                            &mut spd_bytes,
+                            &plist::Value::Dictionary(spd.clone()),
+                        )
+                        .is_ok()
                         {
                             if let Ok(spd_xml) = String::from_utf8(spd_bytes) {
                                 let _ = store_secret(&format!("spd:{apple_id_owned}"), &spd_xml);
@@ -489,12 +503,13 @@ impl AppleService for GrandSlamAppleClient {
             diagnostics: None,
         })?;
 
-        let cert_der = cert_identity.certificate.to_der().map_err(|e| {
-            WinIpaError::Unknown {
+        let cert_der = cert_identity
+            .certificate
+            .to_der()
+            .map_err(|e| WinIpaError::Unknown {
                 message: format!("Failed to encode certificate DER: {e}"),
                 diagnostics: None,
-            }
-        })?;
+            })?;
 
         let priv_pem = cert_identity
             .private_key
@@ -571,7 +586,10 @@ impl AppleService for GrandSlamAppleClient {
             if let Ok(Some(info_str)) = get_secret(&format!("info:{apple_id}")) {
                 if let Ok(mut info) = serde_json::from_str::<AppleSessionInfo>(&info_str) {
                     info.team_id = team_id.to_string();
-                    let _ = store_secret(&format!("info:{apple_id}"), &serde_json::to_string(&info).unwrap_or_default());
+                    let _ = store_secret(
+                        &format!("info:{apple_id}"),
+                        &serde_json::to_string(&info).unwrap_or_default(),
+                    );
                     let _ = store_secret(&format!("saved_team:{apple_id}"), team_id);
                     *self.session_info.lock().unwrap() = Some(info.clone());
                     return Ok(info);
