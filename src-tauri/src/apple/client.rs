@@ -673,6 +673,137 @@ impl AppleDeveloperClient {
             }
         }
     }
+
+    /// After 2FA trust is established, re-runs SRP sign-in to obtain a fresh `myacinfo` cookie.
+    /// Apple will not prompt for 2FA again because the device is now trusted.
+    async fn obtain_myacinfo_via_srp(
+        &mut self,
+        apple_id: &str,
+        password: &str,
+    ) -> Result<String, WinIpaError> {
+        let widget_key = self.resolve_widget_key().await;
+        let (srp_client, a_b64) = AppleSrpClient::new();
+
+        let mut headers = self.build_apple_headers().await?;
+        headers.insert(
+            reqwest::header::ACCEPT,
+            HeaderValue::from_static("application/json"),
+        );
+        headers.insert(
+            HeaderName::from_static("x-apple-widget-key"),
+            HeaderValue::from_str(&widget_key)
+                .unwrap_or_else(|_| HeaderValue::from_static(DEFAULT_WIDGET_KEY)),
+        );
+        headers.insert(
+            HeaderName::from_static("x-requested-with"),
+            HeaderValue::from_static("XMLHttpRequest"),
+        );
+
+        let init_body = serde_json::json!({
+            "accountName": apple_id,
+            "protocols": ["s2k", "s2k_fo"],
+            "a": a_b64
+        });
+
+        let init_resp = self
+            .http_client
+            .post(AUTHKIT_INIT_URL)
+            .headers(headers.clone())
+            .json(&init_body)
+            .send()
+            .await
+            .map_err(|e| WinIpaError::AppleAuthFailed(format!("Re-login init failed: {e}")))?;
+
+        let init_status = init_resp.status();
+        let init_headers = init_resp.headers().clone();
+        if !init_status.is_success() {
+            return Err(WinIpaError::AppleAuthFailed(format!(
+                "Re-login SRP init HTTP {init_status}"
+            )));
+        }
+        let init_bytes = init_resp.bytes().await.map_err(|e| {
+            WinIpaError::AppleAuthFailed(format!("Failed to read re-login init response: {e}"))
+        })?;
+        let srp_init: SrpInitResponse = serde_json::from_slice(&init_bytes).map_err(|e| {
+            WinIpaError::AppleAuthFailed(format!("Failed to parse re-login SRP init: {e}"))
+        })?;
+
+        let salt_bytes = BASE64.decode(&srp_init.salt).map_err(|e| {
+            WinIpaError::AppleAuthFailed(format!("Invalid re-login SRP salt: {e}"))
+        })?;
+        let b_bytes = BASE64.decode(&srp_init.b).map_err(|e| {
+            WinIpaError::AppleAuthFailed(format!("Invalid re-login SRP b: {e}"))
+        })?;
+
+        let (m1_b64, m2_b64) = srp_client.compute_proofs(
+            apple_id,
+            password,
+            &salt_bytes,
+            srp_init.iteration,
+            &srp_init.protocol,
+            &b_bytes,
+        )?;
+
+        let mut complete_headers = headers.clone();
+        if let Some(scnt) = init_headers.get("scnt").and_then(|v| v.to_str().ok()) {
+            if let Ok(val) = HeaderValue::from_str(scnt) {
+                complete_headers.insert(HeaderName::from_static("scnt"), val);
+            }
+        }
+        if let Some(id_sid) = init_headers
+            .get("x-apple-id-session-id")
+            .and_then(|v| v.to_str().ok())
+        {
+            if let Ok(val) = HeaderValue::from_str(id_sid) {
+                complete_headers.insert(HeaderName::from_static("x-apple-id-session-id"), val);
+            }
+        }
+
+        let complete_body = serde_json::json!({
+            "accountName": apple_id,
+            "c": srp_init.c,
+            "m1": m1_b64,
+            "m2": m2_b64,
+            "rememberMe": false
+        });
+
+        let complete_resp = self
+            .http_client
+            .post(AUTHKIT_COMPLETE_URL)
+            .headers(complete_headers)
+            .json(&complete_body)
+            .send()
+            .await
+            .map_err(|e| {
+                WinIpaError::AppleAuthFailed(format!("Re-login SRP complete failed: {e}"))
+            })?;
+
+        let comp_status = complete_resp.status();
+        let comp_headers = complete_resp.headers().clone();
+
+        // 200 means success without 2FA (device is trusted), 409 means 2FA still needed (unexpected)
+        if comp_status.as_u16() == 409 {
+            return Err(WinIpaError::AppleAuthFailed(
+                "2FA re-required after trust (unexpected). Please try signing out and in again.".into(),
+            ));
+        }
+        if !comp_status.is_success() {
+            return Err(WinIpaError::AppleAuthFailed(format!(
+                "Re-login SRP complete HTTP {comp_status}"
+            )));
+        }
+
+        // Extract myacinfo from Set-Cookie or the cookie jar
+        if let Some(myac) = extract_myacinfo_from_headers(&comp_headers)
+            .or_else(|| self.extract_myacinfo_from_jar())
+        {
+            return Ok(myac);
+        }
+
+        Err(WinIpaError::AppleAuthFailed(
+            "Re-login succeeded but no myacinfo cookie was returned. Please try again.".into(),
+        ))
+    }
 }
 
 #[async_trait]
@@ -1088,13 +1219,32 @@ impl AppleService for AppleDeveloperClient {
             let _ = store_secret(&format!("token_header:{apple_id}"), st);
         }
 
+        // Check all known domains for myacinfo cookie (Apple sets it on .apple.com after trust)
         let myacinfo_opt = trust_headers_opt
             .as_ref()
             .and_then(extract_myacinfo_from_headers)
             .or_else(|| self.extract_myacinfo_from_jar())
             .or_else(|| extract_myacinfo_from_headers(&resp_headers));
 
-        let token_opt = myacinfo_opt.or_else(|| final_session_token.clone());
+        // Store password first so re-login can use it
+        if let Some(ref pwd) = self.pending_password {
+            let _ = store_secret(&format!("auth:{apple_id}"), pwd);
+        }
+
+        // If we still don't have a myacinfo cookie after trust, attempt a silent re-login.
+        // After 2FA trust is established, Apple grants myacinfo on a fresh SRP complete
+        // without asking for 2FA again (device is now trusted).
+        let token_opt = if let Some(myac) = myacinfo_opt {
+            Some(myac)
+        } else if let Some(ref pwd) = self.pending_password.clone() {
+            // Re-run SRP to get a fresh myacinfo now that device is trusted
+            match self.obtain_myacinfo_via_srp(&apple_id, pwd).await {
+                Ok(myac) => Some(myac),
+                Err(_) => final_session_token.clone(), // last resort: use the session token
+            }
+        } else {
+            final_session_token.clone()
+        };
 
         if let Some(ref token) = token_opt {
             if let Ok(mut lock) = self.session_token.lock() {
@@ -1103,10 +1253,6 @@ impl AppleService for AppleDeveloperClient {
             let _ = store_secret(&format!("session:{apple_id}"), token);
         }
         let _ = store_secret("active_apple_id", &apple_id);
-
-        if let Some(ref pwd) = self.pending_password {
-            let _ = store_secret(&format!("auth:{apple_id}"), pwd);
-        }
 
         let (team_id, team_name, account_type) = self.try_fetch_initial_team(&apple_id).await;
 
