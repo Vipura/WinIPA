@@ -35,6 +35,11 @@ async-trait = "0.1"
 rfd = "0.15"
 flate2 = "1.1.11"
 crc32fast = "1.5.5"
+num-bigint = "0.5.1"
+pbkdf2 = "0.12"
+hmac = "0.12"
+base64 = "0.23.1"
+hex = "0.4.3"
 
 [dev-dependencies]
 tokio = { version = "1.43", features = ["full"] }

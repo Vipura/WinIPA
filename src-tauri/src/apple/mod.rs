@@ -6,6 +6,7 @@ pub mod client;
 pub mod crypto;
 pub mod mock;
 pub mod service;
+pub mod srp;
 
 use client::AppleDeveloperClient;
 use serde::{Deserialize, Serialize};

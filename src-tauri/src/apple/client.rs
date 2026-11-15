@@ -4,13 +4,17 @@
 use super::anisette::{AnisetteProvider, RemoteAnisetteProvider};
 use super::crypto::generate_dev_csr;
 use super::service::{AppleService, DevelopmentCertificate, LoginResult, ProvisioningProfile};
+use super::srp::AppleSrpClient;
 use super::{AppleAccountType, AppleSessionInfo};
 use crate::errors::WinIpaError;
 use crate::store::{delete_secret, get_secret, store_secret};
 use async_trait::async_trait;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
 use plist::Value;
 use reqwest::cookie::{CookieStore, Jar};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::{Arc, Mutex};
@@ -18,8 +22,34 @@ use std::time::Duration;
 
 pub const DEVELOPER_API_BASE: &str = "https://developerservices2.apple.com/services/QH65B2";
 pub const AUTHKIT_SIGNIN_URL: &str = "https://idmsa.apple.com/appleauth/auth/signin";
+pub const AUTHKIT_INIT_URL: &str = "https://idmsa.apple.com/appleauth/auth/signin/init";
+pub const AUTHKIT_COMPLETE_URL: &str =
+    "https://idmsa.apple.com/appleauth/auth/signin/complete?isRememberMeEnabled=false";
 pub const AUTHKIT_VERIFY_2FA_URL: &str =
     "https://idmsa.apple.com/appleauth/auth/verify/trusteddevice/securitycode";
+pub const DEFAULT_WIDGET_KEY: &str =
+    "e0b80c3bf78523bfe80974d320935bfa30add02e1bff88ec2166c6bd5a706c42";
+
+#[derive(Debug, Deserialize)]
+struct SrpInitResponse {
+    iteration: u32,
+    salt: String,
+    protocol: String,
+    b: String,
+    c: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AppleServiceError {
+    #[serde(default)]
+    message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AppleAuthErrorResponse {
+    #[serde(rename = "serviceErrors")]
+    service_errors: Option<Vec<AppleServiceError>>,
+}
 
 pub struct AppleDeveloperClient {
     pub anisette: Box<dyn AnisetteProvider>,
@@ -31,6 +61,8 @@ pub struct AppleDeveloperClient {
     pub pending_password: Option<String>,
     pub pending_session_id: Option<String>,
     pub pending_scnt: Option<String>,
+    pub pending_widget_key: Option<String>,
+    pub pending_apple_id_session_id: Option<String>,
 }
 
 /// Helper function to extract an Apple session token / myacinfo cookie
@@ -64,6 +96,38 @@ fn extract_apple_session_token(headers: &HeaderMap, fallback: Option<&str>) -> O
     fallback.map(|s| s.to_string())
 }
 
+/// Helper function to parse Apple AuthKit error responses into clean messages.
+fn extract_apple_error_message(status: reqwest::StatusCode, body: &str) -> String {
+    if let Ok(err_json) = serde_json::from_str::<AppleAuthErrorResponse>(body) {
+        if let Some(errs) = err_json.service_errors {
+            if let Some(first_msg) = errs.into_iter().find_map(|e| e.message) {
+                if !first_msg.trim().is_empty() {
+                    return first_msg;
+                }
+            }
+        }
+    }
+    if status.as_u16() == 401 || status.as_u16() == 403 {
+        return "Incorrect Apple ID email or password.".into();
+    }
+    if status.as_u16() == 503 {
+        return "Apple authentication servers are temporarily unavailable or rate-limiting requests. Please wait a few moments and try again.".into();
+    }
+    if body.contains("<html") || body.contains("<HTML") {
+        return format!(
+            "Apple sign-in failed (HTTP {}). Please check your internet connection or try again later.",
+            status.as_u16()
+        );
+    }
+    if !body.is_empty() {
+        return format!("Apple sign-in failed (HTTP {}): {}", status.as_u16(), body);
+    }
+    format!(
+        "Apple sign-in failed (HTTP {}). Please check your credentials or network connection.",
+        status.as_u16()
+    )
+}
+
 impl AppleDeveloperClient {
     pub fn new(anisette_url: Option<String>) -> Self {
         let cookie_jar = Arc::new(Jar::default());
@@ -83,7 +147,32 @@ impl AppleDeveloperClient {
             pending_password: None,
             pending_session_id: None,
             pending_scnt: None,
+            pending_widget_key: None,
+            pending_apple_id_session_id: None,
         }
+    }
+
+    /// Discovers dynamic widgetKey from App Store Connect or falls back to standard key.
+    pub async fn resolve_widget_key(&self) -> String {
+        if let Ok(resp) = self
+            .http_client
+            .head("https://appstoreconnect.apple.com/logout")
+            .send()
+            .await
+        {
+            if let Some(loc) = resp.headers().get(reqwest::header::LOCATION) {
+                if let Ok(loc_str) = loc.to_str() {
+                    if let Some(idx) = loc_str.find("widgetKey=") {
+                        let sub = &loc_str[idx + "widgetKey=".len()..];
+                        let key = sub.split('&').next().unwrap_or("");
+                        if !key.is_empty() {
+                            return key.to_string();
+                        }
+                    }
+                }
+            }
+        }
+        DEFAULT_WIDGET_KEY.to_string()
     }
 
     /// Extracts `myacinfo` cookie from the client's cookie jar.
@@ -385,87 +474,171 @@ impl AppleDeveloperClient {
 #[async_trait]
 impl AppleService for AppleDeveloperClient {
     async fn login(&mut self, apple_id: &str, password: &str) -> Result<LoginResult, WinIpaError> {
-        let headers = self.build_apple_headers().await?;
+        let widget_key = self.resolve_widget_key().await;
+        let (srp_client, a_b64) = AppleSrpClient::new();
 
-        let body = serde_json::json!({
+        let mut headers = self.build_apple_headers().await?;
+        headers.insert(
+            reqwest::header::ACCEPT,
+            HeaderValue::from_static("application/json"),
+        );
+        headers.insert(
+            HeaderName::from_static("x-apple-widget-key"),
+            HeaderValue::from_str(&widget_key)
+                .unwrap_or_else(|_| HeaderValue::from_static(DEFAULT_WIDGET_KEY)),
+        );
+        headers.insert(
+            HeaderName::from_static("x-requested-with"),
+            HeaderValue::from_static("XMLHttpRequest"),
+        );
+
+        let init_body = serde_json::json!({
             "accountName": apple_id,
-            "password": password,
-            "rememberMe": true
+            "protocols": ["s2k", "s2k_fo"],
+            "a": a_b64
         });
 
-        let resp = self
+        let init_resp = self
             .http_client
-            .post(AUTHKIT_SIGNIN_URL)
-            .headers(headers)
-            .json(&body)
+            .post(AUTHKIT_INIT_URL)
+            .headers(headers.clone())
+            .json(&init_body)
             .send()
             .await
             .map_err(|e| {
                 WinIpaError::AppleAuthFailed(format!("Auth server connection failed: {e}"))
             })?;
 
-        let status = resp.status();
-        let resp_headers = resp.headers().clone();
+        let init_status = init_resp.status();
+        let init_resp_headers = init_resp.headers().clone();
 
-        if status.as_u16() == 401 {
-            return Err(WinIpaError::AppleAuthFailed(
-                "Incorrect Apple ID email or password.".into(),
-            ));
+        if !init_status.is_success() {
+            let err_body = init_resp.text().await.unwrap_or_default();
+            if init_status.as_u16() == 429 {
+                return Err(WinIpaError::AppleRateLimited);
+            }
+            return Err(WinIpaError::AppleAuthFailed(extract_apple_error_message(
+                init_status,
+                &err_body,
+            )));
         }
 
-        if status.as_u16() == 429 {
-            return Err(WinIpaError::AppleRateLimited);
+        let init_bytes = init_resp.bytes().await.map_err(|e| {
+            WinIpaError::AppleAuthFailed(format!("Failed to read SRP init response: {e}"))
+        })?;
+
+        let srp_init: SrpInitResponse = serde_json::from_slice(&init_bytes).map_err(|e| {
+            WinIpaError::AppleAuthFailed(format!("Failed to parse SRP init response: {e}"))
+        })?;
+
+        let salt_bytes = BASE64
+            .decode(&srp_init.salt)
+            .map_err(|e| WinIpaError::AppleAuthFailed(format!("Invalid SRP salt base64: {e}")))?;
+
+        let b_bytes = BASE64.decode(&srp_init.b).map_err(|e| {
+            WinIpaError::AppleAuthFailed(format!("Invalid SRP server public key b: {e}"))
+        })?;
+
+        let (m1_b64, m2_b64) = srp_client.compute_proofs(
+            apple_id,
+            password,
+            &salt_bytes,
+            srp_init.iteration,
+            &srp_init.protocol,
+            &b_bytes,
+        )?;
+
+        let mut complete_headers = headers.clone();
+        if let Some(scnt) = init_resp_headers.get("scnt").and_then(|v| v.to_str().ok()) {
+            if let Ok(val) = HeaderValue::from_str(scnt) {
+                complete_headers.insert(HeaderName::from_static("scnt"), val);
+            }
         }
+        if let Some(id_sid) = init_resp_headers
+            .get("x-apple-id-session-id")
+            .and_then(|v| v.to_str().ok())
+        {
+            if let Ok(val) = HeaderValue::from_str(id_sid) {
+                complete_headers.insert(HeaderName::from_static("x-apple-id-session-id"), val);
+            }
+        }
+
+        let complete_body = serde_json::json!({
+            "accountName": apple_id,
+            "c": srp_init.c,
+            "m1": m1_b64,
+            "m2": m2_b64,
+            "rememberMe": false
+        });
+
+        let complete_resp = self
+            .http_client
+            .post(AUTHKIT_COMPLETE_URL)
+            .headers(complete_headers)
+            .json(&complete_body)
+            .send()
+            .await
+            .map_err(|e| {
+                WinIpaError::AppleAuthFailed(format!("Auth server complete failed: {e}"))
+            })?;
+
+        let comp_status = complete_resp.status();
+        let comp_headers = complete_resp.headers().clone();
 
         self.pending_apple_id = Some(apple_id.to_string());
         self.pending_password = Some(password.to_string());
+        self.pending_widget_key = Some(widget_key);
 
-        // Check for 2FA requirement (HTTP 409 or x-apple-session-token / scnt headers)
-        if status.as_u16() == 409 || resp_headers.contains_key("x-apple-session-token") {
-            if let Some(token) = resp_headers
-                .get("x-apple-session-token")
-                .and_then(|v| v.to_str().ok())
-            {
-                self.pending_session_id = Some(token.to_string());
-            }
-            if let Some(scnt) = resp_headers.get("scnt").and_then(|v| v.to_str().ok()) {
-                self.pending_scnt = Some(scnt.to_string());
-            }
-            if self.pending_session_id.is_none() {
-                self.pending_session_id = self.extract_myacinfo_from_jar();
-            }
+        if let Some(scnt) = comp_headers
+            .get("scnt")
+            .and_then(|v| v.to_str().ok())
+            .or_else(|| init_resp_headers.get("scnt").and_then(|v| v.to_str().ok()))
+        {
+            self.pending_scnt = Some(scnt.to_string());
+        }
 
+        if let Some(id_sid) = comp_headers
+            .get("x-apple-id-session-id")
+            .and_then(|v| v.to_str().ok())
+            .or_else(|| {
+                init_resp_headers
+                    .get("x-apple-id-session-id")
+                    .and_then(|v| v.to_str().ok())
+            })
+        {
+            self.pending_apple_id_session_id = Some(id_sid.to_string());
+        }
+
+        if let Some(token) = comp_headers
+            .get("x-apple-session-token")
+            .and_then(|v| v.to_str().ok())
+        {
+            self.pending_session_id = Some(token.to_string());
+        } else if self.pending_session_id.is_none() {
+            self.pending_session_id = self.extract_myacinfo_from_jar();
+        }
+
+        // Check for 2FA requirement (HTTP 409 or x-apple-session-token present with 409)
+        if comp_status.as_u16() == 409 {
             return Ok(LoginResult::TwoFactorRequired {
                 phone_numbers: vec!["Trusted Apple Devices / SMS".into()],
             });
         }
 
-        if !status.is_success() {
-            let err_body = resp.text().await.unwrap_or_default();
-            let clean_msg = if status.as_u16() == 503 {
-                "Apple authentication servers are temporarily unavailable or rate-limiting requests. Please wait a few moments and try again.".to_string()
-            } else if err_body.contains("<html") || err_body.contains("<HTML") {
-                format!(
-                    "Apple sign-in failed (HTTP {}). Please check your internet connection or try again later.",
-                    status.as_u16()
-                )
-            } else if !err_body.is_empty() {
-                format!(
-                    "Apple sign-in failed (HTTP {}): {}",
-                    status.as_u16(),
-                    err_body
-                )
-            } else {
-                format!(
-                    "Apple sign-in failed (HTTP {}). Please check your credentials or network connection.",
-                    status.as_u16()
-                )
-            };
-            return Err(WinIpaError::AppleAuthFailed(clean_msg));
+        if comp_status.as_u16() == 429 {
+            return Err(WinIpaError::AppleRateLimited);
+        }
+
+        if !comp_status.is_success() {
+            let err_body = complete_resp.text().await.unwrap_or_default();
+            return Err(WinIpaError::AppleAuthFailed(extract_apple_error_message(
+                comp_status,
+                &err_body,
+            )));
         }
 
         // Direct success without 2FA
-        let token_opt = extract_apple_session_token(&resp_headers, None)
+        let token_opt = extract_apple_session_token(&comp_headers, None)
             .or_else(|| self.extract_myacinfo_from_jar());
 
         if let Some(ref token) = token_opt {
@@ -510,15 +683,39 @@ impl AppleService for AppleDeveloperClient {
             WinIpaError::TwoFactorFailed("No pending two-factor authentication session".into())
         })?;
 
+        let widget_key = self
+            .pending_widget_key
+            .clone()
+            .unwrap_or_else(|| DEFAULT_WIDGET_KEY.to_string());
+
         let mut headers = self.build_apple_headers().await?;
+        headers.insert(
+            reqwest::header::ACCEPT,
+            HeaderValue::from_static("application/json"),
+        );
+        headers.insert(
+            HeaderName::from_static("x-apple-widget-key"),
+            HeaderValue::from_str(&widget_key)
+                .unwrap_or_else(|_| HeaderValue::from_static(DEFAULT_WIDGET_KEY)),
+        );
+        headers.insert(
+            HeaderName::from_static("x-requested-with"),
+            HeaderValue::from_static("XMLHttpRequest"),
+        );
+
         if let Some(ref session_id) = self.pending_session_id {
             if let Ok(val) = HeaderValue::from_str(session_id) {
-                headers.insert("x-apple-session-token", val);
+                headers.insert(HeaderName::from_static("x-apple-session-token"), val);
             }
         }
         if let Some(ref scnt) = self.pending_scnt {
             if let Ok(val) = HeaderValue::from_str(scnt) {
-                headers.insert("scnt", val);
+                headers.insert(HeaderName::from_static("scnt"), val);
+            }
+        }
+        if let Some(ref id_sid) = self.pending_apple_id_session_id {
+            if let Ok(val) = HeaderValue::from_str(id_sid) {
+                headers.insert(HeaderName::from_static("x-apple-id-session-id"), val);
             }
         }
 
@@ -538,6 +735,16 @@ impl AppleService for AppleDeveloperClient {
             .map_err(|e| WinIpaError::TwoFactorFailed(format!("2FA request failed: {e}")))?;
 
         if !resp.status().is_success() {
+            let err_body = resp.text().await.unwrap_or_default();
+            if let Ok(err_json) = serde_json::from_str::<AppleAuthErrorResponse>(&err_body) {
+                if let Some(errs) = err_json.service_errors {
+                    if let Some(first_msg) = errs.into_iter().find_map(|e| e.message) {
+                        if !first_msg.trim().is_empty() {
+                            return Err(WinIpaError::TwoFactorFailed(first_msg));
+                        }
+                    }
+                }
+            }
             return Err(WinIpaError::TwoFactorFailed(
                 "The 6-digit code was rejected by Apple. Please check the code and re-enter."
                     .into(),
@@ -590,6 +797,8 @@ impl AppleService for AppleDeveloperClient {
         self.pending_password = None;
         self.pending_session_id = None;
         self.pending_scnt = None;
+        self.pending_widget_key = None;
+        self.pending_apple_id_session_id = None;
 
         Ok(session_info)
     }
@@ -687,6 +896,8 @@ impl AppleService for AppleDeveloperClient {
         self.pending_password = None;
         self.pending_session_id = None;
         self.pending_scnt = None;
+        self.pending_widget_key = None;
+        self.pending_apple_id_session_id = None;
 
         Ok(())
     }
