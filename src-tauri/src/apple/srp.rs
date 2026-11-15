@@ -8,14 +8,14 @@ use num_bigint::BigUint;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 
-const N_HEX: &str = "AC6BDB41324AFA59462360144C6A0B4613C2F03980EE4BA77E42FCD57A67F392\
-FB6B7B3B8FBF6D729D27E633E75A4E0FACB102E7CEF772C440E63071E56370B1\
-782A0524E4D78964722ADD214A0450654AC24E1B0721BEB5FA739E0C4318E202\
-DF609EF30FD9AE0A1CB623E71C334752BD3FE8A2DB9DA14EC83E8251F5F2F97C\
-6DA4366EC14E04BBAF42DECBB5E454F6F5030F043DF4BBAC64E86EEF23B4E08E\
-2397227E1DF89CE631E074C4CA23713CA53A5CA07AB6B7C18D659DCD271A41FD\
-83429533F43ED72E063B52D36FA8026E2E0224644A4A9EB80A8C1936024308DA\
-461563B32C145B1E0E384D44B80A84B2FE124E10E3B77E56D54082266C7F6B271407";
+const N_HEX: &str = "AC6BDB41324A9A9BF166DE5E1389582FAF72B6651987EE07FC3192943DB56050\
+A37329CBB4A099ED8193E0757767A13DD52312AB4B03310DCD7F48A9DA04FD50\
+E8083969EDB767B0CF6095179A163AB3661A05FBD5FAAAE82918A9962F0B93B8\
+55F97993EC975EEAA80D740ADBF4FF747359D041D5C33EA71D281E446B14773B\
+CA97B43A23FB801676BD207A436C6481F1D2B9078717461A5B9D32E688F87748\
+544523B524B0D57D5EA77A2775D2ECFA032CFBDBF52FB3786160279004E57AE6\
+AF874E7303CE53299CCC041C7BC308D82A5698F3A8D0C38271AE35F8E9DBFBB6\
+94B5C803D89F7AE435DE236D525F54759B65E372FCD68EF20FA7111F9E4AFF73";
 
 const G_VAL: u32 = 2;
 
@@ -126,7 +126,18 @@ impl AppleSrpClient {
 
         let mut derived = [0u8; 32];
         pbkdf2::pbkdf2_hmac::<Sha256>(&pass_digest, salt, iterations, &mut derived);
-        let x = BigUint::from_bytes_be(&derived);
+
+        // Apple GSA SRP computes x = H(salt | H(":" | derived)) (RFC 5054 with no username in x)
+        let mut inner_hasher = Sha256::new();
+        inner_hasher.update(b":");
+        inner_hasher.update(derived);
+        let inner_hash = inner_hasher.finalize();
+
+        let mut x_hasher = Sha256::new();
+        x_hasher.update(salt);
+        x_hasher.update(inner_hash);
+        let x_bytes = x_hasher.finalize();
+        let x = BigUint::from_bytes_be(&x_bytes);
 
         // k = SHA256(PAD(N) | PAD(g))
         let k = compute_k(&n);
@@ -220,6 +231,32 @@ mod tests {
         let (m1, m2) = res.unwrap();
         assert!(!m1.is_empty());
         assert!(!m2.is_empty());
+    }
+
+    #[test]
+    fn test_srp_known_test_vector() {
+        let n = get_n();
+        let g = BigUint::from(G_VAL);
+        let a_bytes = [7u8; 32];
+        let a = BigUint::from_bytes_be(&a_bytes);
+        let a_pub = g.modpow(&a, &n);
+        let client = AppleSrpClient { a, a_pub };
+
+        let salt = b"1234567890123456";
+        let b_bytes = [5u8; 256];
+        let (m1, m2) = client
+            .compute_proofs(
+                "test@example.com",
+                "TestPassword123!",
+                salt,
+                1000,
+                "s2k_fo",
+                &b_bytes,
+            )
+            .expect("Proofs generation");
+
+        assert_eq!(m1, "dV74kh4Eq2B7NXAOHSNhKdtjqnlunsMYSPpsDm1X7cQ=");
+        assert_eq!(m2, "XXX4wczHL4BpX5GW0PpegTClGnPdbZebbjew8SixMOo=");
     }
 
     #[test]

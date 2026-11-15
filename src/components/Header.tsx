@@ -1,7 +1,8 @@
 // Copyright (C) 2026 WinIPA Contributors
 // SPDX-License-Identifier: GPL-3.0-only
 
-import React from "react";
+import React, { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { STRINGS } from "../strings";
 import { Smartphone, Moon, Sun, ShieldCheck, User, LogOut } from "lucide-react";
 import { AppleSessionInfo } from "../types";
@@ -23,6 +24,18 @@ export const Header: React.FC<HeaderProps> = ({
   appleSession,
   onLogout,
 }) => {
+  const [version, setVersion] = useState<string>(STRINGS.app.version);
+
+  useEffect(() => {
+    invoke<string>("get_app_version")
+      .then((ver) => {
+        if (ver) {
+          setVersion(ver.startsWith("v") ? ver : `v${ver}`);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
   return (
     <header className="header">
       <div className="header-left" onClick={() => onNavigate("home")} style={{ cursor: "pointer" }}>
@@ -31,7 +44,7 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
         <div className="title-group">
           <h1 className="header-title">{STRINGS.app.title}</h1>
-          <span className="badge-tag">{STRINGS.app.version}</span>
+          <span className="badge-tag">{version}</span>
         </div>
       </div>
 
