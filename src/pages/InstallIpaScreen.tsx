@@ -768,6 +768,7 @@ ${fullSystemReport}`;
 
             {pipelineError &&
               (pipelineError.includes("3018") ||
+                pipelineError.includes("3019") ||
                 pipelineError.includes("Xcode 7.3") ||
                 pipelineError.toLowerCase().includes("two-factor")) && (
                 <div
@@ -797,7 +798,7 @@ ${fullSystemReport}`;
                       lineHeight: 1.4,
                     }}
                   >
-                    Apple Developer Services requires an active two-factor authentication session token to generate certificates and provisioning profiles. Click below to re-authenticate with your 6-digit 2FA code. Your Personal Team ID (H2834KURW4) is preserved automatically.
+                    Apple Developer Services requires an active two-factor authentication session token to generate certificates and provisioning profiles. Click below to re-authenticate with your 6-digit 2FA code. Your Developer Team ({appleSession?.team_name || appleSession?.team_id || "Blaze Ho2 (H2834KURW4)"}) is preserved automatically.
                   </p>
                   <button
                     type="button"

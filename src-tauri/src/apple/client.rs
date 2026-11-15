@@ -218,8 +218,7 @@ impl AppleDeveloperClient {
         if let Ok(guard) = self.session_token.lock() {
             if let Some(ref t) = *guard {
                 let trimmed = t.trim();
-                // Reject AuthKit JWT/session tokens starting with AQAA
-                if !trimmed.is_empty() && !trimmed.starts_with("AQAA") {
+                if !trimmed.is_empty() {
                     return Some(trimmed.to_string());
                 }
             }
@@ -237,7 +236,16 @@ impl AppleDeveloperClient {
         if let Ok(Some(apple_id)) = get_secret("active_apple_id") {
             if let Ok(Some(token)) = get_secret(&format!("session:{apple_id}")) {
                 let trimmed = token.trim();
-                if !trimmed.is_empty() && !trimmed.starts_with("AQAA") {
+                if !trimmed.is_empty() {
+                    if let Ok(mut guard) = self.session_token.lock() {
+                        *guard = Some(trimmed.to_string());
+                    }
+                    return Some(trimmed.to_string());
+                }
+            }
+            if let Ok(Some(st)) = get_secret(&format!("token_header:{apple_id}")) {
+                let trimmed = st.trim();
+                if !trimmed.is_empty() {
                     if let Ok(mut guard) = self.session_token.lock() {
                         *guard = Some(trimmed.to_string());
                     }
@@ -246,10 +254,10 @@ impl AppleDeveloperClient {
             }
         }
 
-        // 4. Pending session ID fallback (only if not an AQAA AuthKit token)
+        // 4. Pending session ID fallback
         if let Some(ref pending) = self.pending_session_id {
             let trimmed = pending.trim();
-            if !trimmed.is_empty() && !trimmed.starts_with("AQAA") {
+            if !trimmed.is_empty() {
                 return Some(trimmed.to_string());
             }
         }
@@ -428,6 +436,7 @@ impl AppleDeveloperClient {
             .header("Accept", "text/x-xml-plist")
             .header("User-Agent", "Xcode/15.2 (15C500b)")
             .header("X-Xcode-Version", "15.2 (15C500b)")
+            .header("X-Apple-App-Info", "com.apple.gs.xcode.auth")
             .header("Connection", "close")
             .header("Cookie", format!("myacinfo={token}"))
             .body(body_bytes);
@@ -461,6 +470,9 @@ impl AppleDeveloperClient {
             }
             if let Some(ref loc) = ani.x_apple_locale {
                 set_header(&mut hmap, "x-apple-locale", loc);
+            }
+            if let Some(ref srl) = ani.x_apple_i_srl_no {
+                set_header(&mut hmap, "x-apple-i-srl-no", srl);
             }
             req = req.headers(hmap);
         }
@@ -557,7 +569,7 @@ impl AppleDeveloperClient {
                                 "Apple developer session expired. Please click 'Sign Out' in Device & Account and log in again.".into(),
                             ))
                         }
-                        3018 => {
+                        3018 | 3019 => {
                             if let Ok(mut lock) = self.session_token.lock() {
                                 *lock = None;
                             }
@@ -566,9 +578,10 @@ impl AppleDeveloperClient {
                             }
                             if let Ok(Some(apple_id)) = get_secret("active_apple_id") {
                                 let _ = delete_secret(&format!("token_header:{apple_id}"));
+                                let _ = delete_secret(&format!("session:{apple_id}"));
                             }
                             Err(WinIpaError::AppleAuthFailed(
-                                "Your Apple Developer session requires two-factor authentication refresh (Apple error 3018). Please click 'Log Out' in the top bar, then sign in with your Apple ID and enter the 2FA code to refresh your session.".into(),
+                                format!("Your Apple Developer session requires two-factor authentication refresh (Apple error {result_code}). Please click 'Log Out & Sign In Again' to authenticate with your 6-digit 2FA code."),
                             ))
                         }
                         3038 | 3041 => Err(WinIpaError::AppleRateLimited),
@@ -576,7 +589,7 @@ impl AppleDeveloperClient {
                             "Apple Developer error 3050 (Please select a team): No active developer team was found for this Apple ID. If this is a new Apple ID, please sign in once to https://developer.apple.com/account in your web browser, accept the free Apple Developer Agreement to activate your Personal Team, then click Try Again.".into(),
                         )),
                         _ => Err(WinIpaError::Unknown {
-                            message: format!("Apple Developer error {result_code}: {err_string}"),
+                            message: format!("Apple Developer error {result_code} on '{action}': {err_string}"),
                             diagnostics: None,
                         }),
                     };
@@ -1057,13 +1070,31 @@ impl AppleService for AppleDeveloperClient {
 
         let trust_headers_opt = trust_resp.ok().map(|r| r.headers().clone());
 
+        // Extract session token from verify response, trust response, or pending complete response
+        let final_session_token = verify_session_token
+            .or_else(|| {
+                trust_headers_opt
+                    .as_ref()
+                    .and_then(|h| h.get("x-apple-session-token"))
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.to_string())
+            })
+            .or_else(|| self.pending_session_id.clone());
+
+        if let Some(ref st) = final_session_token {
+            if let Ok(mut lock) = self.session_token_header.lock() {
+                *lock = Some(st.clone());
+            }
+            let _ = store_secret(&format!("token_header:{apple_id}"), st);
+        }
+
         let myacinfo_opt = trust_headers_opt
             .as_ref()
             .and_then(extract_myacinfo_from_headers)
             .or_else(|| self.extract_myacinfo_from_jar())
             .or_else(|| extract_myacinfo_from_headers(&resp_headers));
 
-        let token_opt = myacinfo_opt.or(verify_session_token);
+        let token_opt = myacinfo_opt.or_else(|| final_session_token.clone());
 
         if let Some(ref token) = token_opt {
             if let Ok(mut lock) = self.session_token.lock() {
@@ -1359,11 +1390,21 @@ impl AppleService for AppleDeveloperClient {
 
     async fn request_development_certificate(&self) -> Result<DevelopmentCertificate, WinIpaError> {
         let team_id = self.resolve_team_id().await?;
-        let key_pair = generate_dev_csr("Apple Development: WinIPA User", &team_id)?;
+        let apple_id = get_secret("active_apple_id")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "WinIPA User".to_string());
+        let cn = format!("Apple Development: {apple_id} ({team_id})");
+        let key_pair = generate_dev_csr(&cn, &team_id)?;
 
         let mut params = HashMap::new();
         params.insert("csrContent".into(), key_pair.csr_pem.clone());
         params.insert("teamId".into(), team_id.clone());
+        params.insert("machineName".into(), "WinIPA-PC".into());
+        params.insert(
+            "machineId".into(),
+            uuid::Uuid::new_v4().to_string().to_uppercase(),
+        );
 
         let resp_res = self
             .call_developer_api("ios/submitDevelopmentCSR.action", &params)

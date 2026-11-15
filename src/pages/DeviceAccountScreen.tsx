@@ -62,6 +62,9 @@ export const DeviceAccountScreen: React.FC<DeviceAccountScreenProps> = ({
   useEffect(() => {
     if (initialAppleSession !== undefined) {
       setAppleSession(initialAppleSession);
+      if (initialAppleSession?.apple_id && !email) {
+        setEmail(initialAppleSession.apple_id);
+      }
     }
   }, [initialAppleSession]);
   const [installedApps, setInstalledApps] = useState<InstalledAppRecord[]>([]);
