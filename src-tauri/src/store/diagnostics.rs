@@ -20,7 +20,11 @@ pub async fn generate_diagnostics_report() -> String {
         "================================================================================"
     );
     let _ = writeln!(out, "Report Generated: {}", chrono_or_std_timestamp());
-    let _ = writeln!(out, "Application Version: WinIPA v0.1.0 (GPL-3.0)");
+    let _ = writeln!(
+        out,
+        "Application Version: WinIPA v{} (GPL-3.0)",
+        env!("CARGO_PKG_VERSION")
+    );
     let _ = writeln!(
         out,
         "Host Platform: {} ({})",

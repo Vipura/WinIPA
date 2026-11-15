@@ -365,7 +365,9 @@ impl AppleDeveloperClient {
             .http_client
             .post(&url)
             .header("Content-Type", "text/x-xml-plist")
+            .header("Accept", "text/x-xml-plist")
             .header("User-Agent", "Xcode/15.2 (15C500b)")
+            .header("Connection", "close")
             .header("Cookie", format!("myacinfo={token}"))
             .body(body_bytes);
 
@@ -448,10 +450,30 @@ impl AppleDeveloperClient {
             )));
         }
 
+        // 4. Detect empty response body (which causes UnexpectedEndOfEventStream)
+        if bytes.is_empty() || bytes.iter().all(|b| b.is_ascii_whitespace()) {
+            if let Ok(mut lock) = self.session_token.lock() {
+                *lock = None;
+            }
+            return Err(WinIpaError::AppleAuthFailed(format!(
+                "Apple Developer service returned an empty response for action '{action}' (HTTP {}). Please click 'Sign Out' in Device & Account and log in again to establish a fresh session.",
+                status.as_u16()
+            )));
+        }
+
         let plist_resp =
             Value::from_reader(Cursor::new(&bytes)).map_err(|e| WinIpaError::Unknown {
-                message: format!("Failed to parse developer API response plist: {e}"),
-                diagnostics: Some(body_preview.chars().take(200).collect()),
+                message: format!(
+                    "Failed to parse developer API response plist for '{action}' (HTTP {}, {} bytes): {e}",
+                    status.as_u16(),
+                    bytes.len()
+                ),
+                diagnostics: Some(format!(
+                    "action={action}, status={}, len={}, preview={:?}",
+                    status.as_u16(),
+                    bytes.len(),
+                    body_preview.chars().take(200).collect::<String>()
+                )),
             })?;
 
         // Check for Apple Developer Portal error codes
@@ -494,7 +516,10 @@ impl AppleDeveloperClient {
         let params = HashMap::new();
         let resp = match self.call_developer_api("listTeams.action", &params).await {
             Ok(r) => r,
-            Err(_) => self.call_developer_api("ios/listTeams.action", &params).await?,
+            Err(_) => {
+                self.call_developer_api("ios/listTeams.action", &params)
+                    .await?
+            }
         };
         let mut teams = Vec::new();
         if let Some(dict) = resp.as_dictionary() {
@@ -729,7 +754,10 @@ impl AppleService for AppleDeveloperClient {
         }
 
         // Direct success without 2FA
-        if let Some(st) = comp_headers.get("x-apple-session-token").and_then(|v| v.to_str().ok()) {
+        if let Some(st) = comp_headers
+            .get("x-apple-session-token")
+            .and_then(|v| v.to_str().ok())
+        {
             if let Ok(mut lock) = self.session_token_header.lock() {
                 *lock = Some(st.to_string());
             }
@@ -1107,7 +1135,9 @@ impl AppleService for AppleDeveloperClient {
             params.insert("teamId".into(), team_id.clone());
         }
 
-        let resp_res = self.call_developer_api("ios/addDevice.action", &params).await;
+        let resp_res = self
+            .call_developer_api("ios/addDevice.action", &params)
+            .await;
 
         let resp = match resp_res {
             Ok(v) => v,
@@ -1170,7 +1200,9 @@ impl AppleService for AppleDeveloperClient {
             params.insert("teamId".into(), team_id.clone());
         }
 
-        let resp_res = self.call_developer_api("ios/addAppId.action", &params).await;
+        let resp_res = self
+            .call_developer_api("ios/addAppId.action", &params)
+            .await;
 
         let resp = match resp_res {
             Ok(v) => v,
@@ -1258,7 +1290,8 @@ impl AppleService for AppleDeveloperClient {
                                             cd.get("serialNumber").and_then(|v| v.as_string())
                                         {
                                             let mut rev_params = HashMap::new();
-                                            rev_params.insert("serialNumber".into(), serial.to_string());
+                                            rev_params
+                                                .insert("serialNumber".into(), serial.to_string());
                                             if team_id != "PERSONAL" && !team_id.is_empty() {
                                                 rev_params.insert("teamId".into(), team_id.clone());
                                             }
