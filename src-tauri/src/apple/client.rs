@@ -177,14 +177,20 @@ impl AppleDeveloperClient {
 
     /// Extracts `myacinfo` cookie from the client's cookie jar.
     fn extract_myacinfo_from_jar(&self) -> Option<String> {
-        let apple_url = reqwest::Url::parse("https://apple.com").ok()?;
-        if let Some(cookie_hdr) = self.cookie_jar.cookies(&apple_url) {
-            if let Ok(c_str) = cookie_hdr.to_str() {
-                for part in c_str.split(';') {
-                    let part = part.trim();
-                    if let Some(val) = part.strip_prefix("myacinfo=") {
-                        if !val.is_empty() {
-                            return Some(val.to_string());
+        let urls = [
+            reqwest::Url::parse("https://idmsa.apple.com").ok(),
+            reqwest::Url::parse("https://apple.com").ok(),
+            reqwest::Url::parse("https://developerservices2.apple.com").ok(),
+        ];
+        for u in urls.into_iter().flatten() {
+            if let Some(cookie_hdr) = self.cookie_jar.cookies(&u) {
+                if let Ok(c_str) = cookie_hdr.to_str() {
+                    for part in c_str.split(';') {
+                        let part = part.trim();
+                        if let Some(val) = part.strip_prefix("myacinfo=") {
+                            if !val.is_empty() {
+                                return Some(val.to_string());
+                            }
                         }
                     }
                 }
@@ -474,6 +480,21 @@ impl AppleDeveloperClient {
 #[async_trait]
 impl AppleService for AppleDeveloperClient {
     async fn login(&mut self, apple_id: &str, password: &str) -> Result<LoginResult, WinIpaError> {
+        // Reset pending state and cookie jar to ensure fresh session
+        self.pending_apple_id = None;
+        self.pending_password = None;
+        self.pending_session_id = None;
+        self.pending_scnt = None;
+        self.pending_widget_key = None;
+        self.pending_apple_id_session_id = None;
+        let new_jar = Arc::new(Jar::default());
+        self.cookie_jar = new_jar.clone();
+        self.http_client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(20))
+            .cookie_provider(new_jar)
+            .build()
+            .unwrap_or_default();
+
         let widget_key = self.resolve_widget_key().await;
         let (srp_client, a_b64) = AppleSrpClient::new();
 
@@ -614,11 +635,11 @@ impl AppleService for AppleDeveloperClient {
             .and_then(|v| v.to_str().ok())
         {
             self.pending_session_id = Some(token.to_string());
-        } else if self.pending_session_id.is_none() {
-            self.pending_session_id = self.extract_myacinfo_from_jar();
+        } else {
+            self.pending_session_id = None;
         }
 
-        // Check for 2FA requirement (HTTP 409 or x-apple-session-token present with 409)
+        // Check for 2FA requirement (HTTP 409)
         if comp_status.as_u16() == 409 {
             return Ok(LoginResult::TwoFactorRequired {
                 phone_numbers: vec!["Trusted Apple Devices / SMS".into()],
@@ -679,6 +700,7 @@ impl AppleService for AppleDeveloperClient {
     }
 
     async fn submit_2fa(&mut self, code: &str) -> Result<AppleSessionInfo, WinIpaError> {
+        let code = code.trim();
         let apple_id = self.pending_apple_id.clone().ok_or_else(|| {
             WinIpaError::TwoFactorFailed("No pending two-factor authentication session".into())
         })?;
@@ -703,11 +725,9 @@ impl AppleService for AppleDeveloperClient {
             HeaderValue::from_static("XMLHttpRequest"),
         );
 
-        if let Some(ref session_id) = self.pending_session_id {
-            if let Ok(val) = HeaderValue::from_str(session_id) {
-                headers.insert(HeaderName::from_static("x-apple-session-token"), val);
-            }
-        }
+        // Apple AuthKit uses scnt and x-apple-id-session-id for 2FA verification.
+        // Fastlane Spaceship and Apple IDMS reject verify requests if an invalid/premature
+        // x-apple-session-token is provided.
         if let Some(ref scnt) = self.pending_scnt {
             if let Ok(val) = HeaderValue::from_str(scnt) {
                 headers.insert(HeaderName::from_static("scnt"), val);
@@ -734,28 +754,104 @@ impl AppleService for AppleDeveloperClient {
             .await
             .map_err(|e| WinIpaError::TwoFactorFailed(format!("2FA request failed: {e}")))?;
 
-        if !resp.status().is_success() {
+        let resp_status = resp.status();
+        let resp_headers = resp.headers().clone();
+
+        if !resp_status.is_success() {
+            let status_code = resp_status.as_u16();
             let err_body = resp.text().await.unwrap_or_default();
-            if let Ok(err_json) = serde_json::from_str::<AppleAuthErrorResponse>(&err_body) {
-                if let Some(errs) = err_json.service_errors {
-                    if let Some(first_msg) = errs.into_iter().find_map(|e| e.message) {
-                        if !first_msg.trim().is_empty() {
-                            return Err(WinIpaError::TwoFactorFailed(first_msg));
+
+            let mut parsed_msg: Option<String> = None;
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&err_body) {
+                if let Some(errs) = val.get("serviceErrors").and_then(|v| v.as_array()) {
+                    for err in errs {
+                        if let Some(msg) = err.get("message").and_then(|v| v.as_str()) {
+                            if !msg.trim().is_empty() {
+                                parsed_msg = Some(msg.to_string());
+                                break;
+                            }
+                        }
+                    }
+                }
+                if parsed_msg.is_none() {
+                    if let Some(msg) = val
+                        .get("message")
+                        .or_else(|| val.get("title"))
+                        .or_else(|| val.get("errorMessage"))
+                        .and_then(|v| v.as_str())
+                    {
+                        if !msg.trim().is_empty() {
+                            parsed_msg = Some(msg.to_string());
                         }
                     }
                 }
             }
-            return Err(WinIpaError::TwoFactorFailed(
-                "The 6-digit code was rejected by Apple. Please check the code and re-enter."
-                    .into(),
-            ));
+
+            if let Some(msg) = parsed_msg {
+                return Err(WinIpaError::TwoFactorFailed(msg));
+            }
+
+            if status_code == 400 || status_code == 401 || status_code == 403 {
+                return Err(WinIpaError::TwoFactorFailed(
+                    "The 6-digit code was rejected by Apple. Please check the code and re-enter."
+                        .into(),
+                ));
+            }
+
+            return Err(WinIpaError::TwoFactorFailed(format!(
+                "Apple 2FA verification failed (HTTP {status_code}): {err_body}"
+            )));
         }
 
-        let resp_headers = resp.headers().clone();
-        let token_opt =
-            extract_apple_session_token(&resp_headers, self.pending_session_id.as_deref())
-                .or_else(|| self.extract_myacinfo_from_jar())
-                .or_else(|| self.pending_session_id.clone());
+        // Update scnt / session id if updated headers returned
+        if let Some(scnt) = resp_headers.get("scnt").and_then(|v| v.to_str().ok()) {
+            self.pending_scnt = Some(scnt.to_string());
+        }
+        if let Some(sid) = resp_headers
+            .get("x-apple-id-session-id")
+            .and_then(|v| v.to_str().ok())
+        {
+            self.pending_apple_id_session_id = Some(sid.to_string());
+        }
+
+        // Send trust request to establish persistent session cookies (Fastlane store_session / 2sv/trust)
+        let mut trust_headers = self.build_apple_headers().await.unwrap_or_default();
+        trust_headers.insert(
+            reqwest::header::ACCEPT,
+            HeaderValue::from_static("application/json"),
+        );
+        trust_headers.insert(
+            HeaderName::from_static("x-apple-widget-key"),
+            HeaderValue::from_str(&widget_key)
+                .unwrap_or_else(|_| HeaderValue::from_static(DEFAULT_WIDGET_KEY)),
+        );
+        if let Some(ref scnt) = self.pending_scnt {
+            if let Ok(val) = HeaderValue::from_str(scnt) {
+                trust_headers.insert(HeaderName::from_static("scnt"), val);
+            }
+        }
+        if let Some(ref id_sid) = self.pending_apple_id_session_id {
+            if let Ok(val) = HeaderValue::from_str(id_sid) {
+                trust_headers.insert(HeaderName::from_static("x-apple-id-session-id"), val);
+            }
+        }
+
+        let trust_resp = self
+            .http_client
+            .get("https://idmsa.apple.com/appleauth/auth/2sv/trust")
+            .headers(trust_headers)
+            .send()
+            .await;
+
+        let trust_headers_opt = trust_resp.ok().map(|r| r.headers().clone());
+
+        let token_opt = extract_apple_session_token(&resp_headers, None)
+            .or_else(|| self.extract_myacinfo_from_jar())
+            .or_else(|| {
+                trust_headers_opt
+                    .as_ref()
+                    .and_then(|h| extract_apple_session_token(h, None))
+            });
 
         if let Some(ref token) = token_opt {
             if let Ok(mut lock) = self.session_token.lock() {
@@ -898,6 +994,14 @@ impl AppleService for AppleDeveloperClient {
         self.pending_scnt = None;
         self.pending_widget_key = None;
         self.pending_apple_id_session_id = None;
+
+        let new_jar = Arc::new(Jar::default());
+        self.cookie_jar = new_jar.clone();
+        self.http_client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(20))
+            .cookie_provider(new_jar)
+            .build()
+            .unwrap_or_default();
 
         Ok(())
     }

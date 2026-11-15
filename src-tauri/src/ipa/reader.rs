@@ -227,9 +227,15 @@ fn extract_app_icon(
             let mut buf = Vec::new();
             if file.read_to_end(&mut buf).is_ok() && !buf.is_empty() {
                 // If it is an Apple CgBI PNG, uncrush it to standard compliant PNG
-                let final_png = uncrush_cgbi_png(&buf).unwrap_or(buf);
-                let encoded = base64_encode(&final_png);
-                return Some(format!("data:image/png;base64,{encoded}"));
+                let valid_png_opt = if is_cgbi_png(&buf) {
+                    uncrush_cgbi_png(&buf)
+                } else {
+                    Some(buf)
+                };
+                if let Some(final_png) = valid_png_opt {
+                    let encoded = base64_encode(&final_png);
+                    return Some(format!("data:image/png;base64,{encoded}"));
+                }
             }
         }
     }

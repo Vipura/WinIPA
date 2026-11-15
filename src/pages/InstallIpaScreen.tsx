@@ -675,7 +675,7 @@ ${fullSystemReport}`;
               {metadata.icon_base64 && !iconError ? (
                 <img
                   src={metadata.icon_base64}
-                  alt={metadata.app_name}
+                  alt=""
                   className="app-icon-img"
                   onError={() => setIconError(true)}
                 />
