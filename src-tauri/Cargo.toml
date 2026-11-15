@@ -1,6 +1,6 @@
 [package]
 name = "winipa"
-version = "0.1.15"
+version = "0.1.16"
 description = "Test iOS apps on iPhone from Windows without a Mac"
 authors = ["WinIPA Contributors"]
 edition = "2021"
@@ -40,6 +40,9 @@ pbkdf2 = "0.12"
 hmac = "0.12"
 base64 = "0.23.1"
 hex = "0.4.3"
+isideload = { version = "0.5.2", features = ["fs-storage"] }
+rootcause = "0.12.1"
+x509-cert = { version = "0.2.5", features = ["pem"] }
 
 [dev-dependencies]
 tokio = { version = "1.43", features = ["full"] }

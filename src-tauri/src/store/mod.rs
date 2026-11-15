@@ -26,13 +26,19 @@ pub struct AppStore {
     pub installed_apps: Vec<InstalledAppRecord>,
 }
 
-fn get_vault_path() -> std::path::PathBuf {
+pub fn get_app_dir() -> std::path::PathBuf {
     if let Ok(appdata) = std::env::var("APPDATA") {
         let dir = std::path::PathBuf::from(appdata).join("WinIPA");
         let _ = std::fs::create_dir_all(&dir);
-        return dir.join("vault.json");
+        return dir;
     }
-    std::env::temp_dir().join("winipa_vault.json")
+    let dir = std::env::temp_dir().join("WinIPA");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+fn get_vault_path() -> std::path::PathBuf {
+    get_app_dir().join("vault.json")
 }
 
 fn load_vault() -> std::collections::HashMap<String, String> {

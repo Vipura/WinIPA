@@ -4,11 +4,12 @@
 pub mod anisette;
 pub mod client;
 pub mod crypto;
+pub mod grandslam;
 pub mod mock;
 pub mod service;
 pub mod srp;
 
-use client::AppleDeveloperClient;
+use grandslam::GrandSlamAppleClient;
 use serde::{Deserialize, Serialize};
 pub use service::{AppleService, DevelopmentCertificate, LoginResult, ProvisioningProfile};
 use std::sync::Arc;
@@ -33,10 +34,7 @@ pub struct AppleSessionInfo {
 pub type SharedAppleService = Arc<Mutex<Box<dyn AppleService>>>;
 
 pub fn create_default_apple_service() -> SharedAppleService {
-    let custom_url = crate::store::get_secret("custom_anisette_url")
-        .ok()
-        .flatten();
-    Arc::new(Mutex::new(Box::new(AppleDeveloperClient::new(custom_url))))
+    Arc::new(Mutex::new(Box::new(GrandSlamAppleClient::new())))
 }
 
 /// Helper to get or initialize the global shared AppleService.
