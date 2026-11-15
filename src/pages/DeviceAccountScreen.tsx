@@ -16,6 +16,7 @@ import {
   appleSubmit2Fa,
   appleGetSession,
   appleLogout,
+  appleSetTeamId,
 } from "../api/apple";
 import { getInstalledApps, removeInstalledApp } from "../api/pipeline";
 import { getRedactedDiagnostics, exportDiagnosticsToFile } from "../api/diagnostics";
@@ -77,6 +78,35 @@ export const DeviceAccountScreen: React.FC<DeviceAccountScreenProps> = ({
   const [twoFaCode, setTwoFaCode] = useState<string>("");
   const [authLoading, setAuthLoading] = useState<boolean>(false);
   const [authError, setAuthError] = useState<string | null>(null);
+
+  // Team ID Editing State
+  const [isEditingTeamId, setIsEditingTeamId] = useState<boolean>(false);
+  const [customTeamId, setCustomTeamId] = useState<string>("");
+  const [teamIdSaving, setTeamIdSaving] = useState<boolean>(false);
+  const [teamIdError, setTeamIdError] = useState<string | null>(null);
+  const [teamIdSuccess, setTeamIdSuccess] = useState<string | null>(null);
+
+  const handleSaveTeamId = async () => {
+    const clean = customTeamId.trim().toUpperCase();
+    if (clean.length !== 10 || !/^[A-Z0-9]{10}$/.test(clean)) {
+      setTeamIdError("Team ID must be exactly 10 alphanumeric characters (e.g. 7X8Y9Z1A2B).");
+      return;
+    }
+    setTeamIdSaving(true);
+    setTeamIdError(null);
+    try {
+      const updated = await appleSetTeamId(clean);
+      setAppleSession(updated);
+      onSessionChange?.(updated);
+      setIsEditingTeamId(false);
+      setTeamIdSuccess("Team ID updated successfully!");
+      setTimeout(() => setTeamIdSuccess(null), 3500);
+    } catch (err: any) {
+      setTeamIdError(typeof err === "string" ? err : err?.message || "Failed to update Team ID");
+    } finally {
+      setTeamIdSaving(false);
+    }
+  };
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -482,11 +512,83 @@ export const DeviceAccountScreen: React.FC<DeviceAccountScreenProps> = ({
                 <span className="detail-label">Apple ID:</span>
                 <span className="detail-value font-mono">{appleSession.apple_id}</span>
               </div>
-              <div className="detail-row">
-                <span className="detail-label">Team:</span>
-                <span className="detail-value">
-                  {appleSession.team_name} ({appleSession.team_id})
-                </span>
+              <div className="detail-row" style={{ alignItems: "flex-start" }}>
+                <span className="detail-label" style={{ marginTop: "4px" }}>Team:</span>
+                <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: "0.25rem" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
+                    <span className="detail-value">
+                      {appleSession.team_name} ({appleSession.team_id})
+                    </span>
+                    {appleSession.team_id === "PERSONAL" && (
+                      <span className="status-pill pill-warning" style={{ fontSize: "0.7rem", padding: "0.15rem 0.4rem" }}>
+                        Action Needed: Set 10-Char Team ID
+                      </span>
+                    )}
+                    {!isEditingTeamId && (
+                      <button
+                        type="button"
+                        className="btn btn-outline btn-sm"
+                        style={{ fontSize: "0.75rem", padding: "0.15rem 0.5rem" }}
+                        onClick={() => {
+                          setCustomTeamId(appleSession.team_id === "PERSONAL" ? "" : appleSession.team_id);
+                          setIsEditingTeamId(true);
+                          setTeamIdError(null);
+                        }}
+                      >
+                        {appleSession.team_id === "PERSONAL" ? "Enter Team ID" : "Edit Team ID"}
+                      </button>
+                    )}
+                  </div>
+
+                  {isEditingTeamId && (
+                    <div style={{ marginTop: "0.5rem", padding: "0.75rem", background: "var(--bg-card)", border: "1px solid var(--border-color)", borderRadius: "6px" }}>
+                      <p style={{ fontSize: "0.8rem", opacity: 0.85, marginBottom: "0.5rem" }}>
+                        Enter your 10-character Personal Team ID from Xcode on Mac (Settings &gt; Accounts) or Mac Keychain Access:
+                      </p>
+                      <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+                        <input
+                          type="text"
+                          className="input font-mono uppercase"
+                          placeholder="e.g. 7A8B9C1D2E"
+                          maxLength={10}
+                          value={customTeamId}
+                          onChange={(e) => {
+                            setCustomTeamId(e.target.value.toUpperCase());
+                            setTeamIdError(null);
+                          }}
+                          style={{ width: "160px", padding: "0.3rem 0.5rem", fontSize: "0.85rem", textTransform: "uppercase" }}
+                        />
+                        <button
+                          type="button"
+                          className="btn btn-primary btn-sm"
+                          disabled={teamIdSaving || customTeamId.trim().length !== 10}
+                          onClick={handleSaveTeamId}
+                          style={{ fontSize: "0.8rem", padding: "0.3rem 0.6rem" }}
+                        >
+                          {teamIdSaving ? "Saving..." : "Save"}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-outline btn-sm"
+                          onClick={() => {
+                            setIsEditingTeamId(false);
+                            setTeamIdError(null);
+                          }}
+                          style={{ fontSize: "0.8rem", padding: "0.3rem 0.6rem" }}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                      {teamIdError && (
+                        <p style={{ color: "var(--danger)", fontSize: "0.75rem", marginTop: "0.4rem" }}>{teamIdError}</p>
+                      )}
+                    </div>
+                  )}
+
+                  {teamIdSuccess && (
+                    <p style={{ color: "var(--success)", fontSize: "0.75rem", marginTop: "0.2rem" }}>{teamIdSuccess}</p>
+                  )}
+                </div>
               </div>
               <div className="detail-row">
                 <span className="detail-label">Account Tier:</span>

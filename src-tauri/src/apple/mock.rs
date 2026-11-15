@@ -147,6 +147,23 @@ impl AppleService for MockAppleService {
             expires_at: now + 7 * 86400,
         })
     }
+
+    async fn set_team_id(&mut self, team_id: &str) -> Result<AppleSessionInfo, WinIpaError> {
+        let team_id_clean = team_id.trim().to_uppercase();
+        if team_id_clean.len() != 10 || !team_id_clean.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return Err(WinIpaError::AppleAuthFailed(
+                "Team ID must be exactly 10 alphanumeric characters (e.g. 7X8Y9Z1A2B)".into(),
+            ));
+        }
+
+        if let Some(ref mut session) = self.session {
+            session.team_id = team_id_clean.clone();
+            session.team_name = format!("{} (Personal Team)", session.apple_id);
+            return Ok(session.clone());
+        }
+
+        Err(WinIpaError::AppleAuthFailed("No active session to update Team ID".into()))
+    }
 }
 
 #[cfg(test)]
@@ -260,5 +277,22 @@ mod tests {
             prof.profile_name,
             "iOS Team Provisioning Profile: com.mock.app"
         );
+    }
+
+    #[tokio::test]
+    async fn test_mock_set_team_id() {
+        let mut service = MockAppleService::default();
+        let _ = service.login("developer@example.com", "valid_password").await.unwrap();
+
+        // Invalid length
+        let err = service.set_team_id("TOO_SHORT").await.unwrap_err();
+        match err {
+            WinIpaError::AppleAuthFailed(_) => {}
+            _ => panic!("Expected AppleAuthFailed for invalid team ID"),
+        }
+
+        // Valid 10-char team ID
+        let updated = service.set_team_id("abc1234xyz").await.unwrap();
+        assert_eq!(updated.team_id, "ABC1234XYZ");
     }
 }

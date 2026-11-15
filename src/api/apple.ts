@@ -28,6 +28,12 @@ export async function appleLogout(): Promise<void> {
   return await invoke<void>("apple_logout");
 }
 
+export async function appleSetTeamId(
+  teamId: string
+): Promise<AppleSessionInfo> {
+  return await invoke<AppleSessionInfo>("apple_set_team_id", { teamId });
+}
+
 export async function appleProvisionDevice(
   bundleId: string,
   udid: string,

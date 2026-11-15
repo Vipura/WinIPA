@@ -48,4 +48,5 @@ pub trait AppleService: Send + Sync {
         device_id: &str,
         cert_id: &str,
     ) -> Result<ProvisioningProfile, WinIpaError>;
+    async fn set_team_id(&mut self, team_id: &str) -> Result<AppleSessionInfo, WinIpaError>;
 }

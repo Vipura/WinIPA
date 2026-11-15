@@ -319,7 +319,7 @@ impl AppleDeveloperClient {
         }
 
         Err(WinIpaError::AppleAuthFailed(
-            "Apple Developer error 3050 (Please select a team): No active developer team was found for this Apple ID. If this is a new Apple ID, please sign in once to https://developer.apple.com/account in your web browser, accept the free Apple Developer Agreement to activate your Personal Team, then click Try Again.".into(),
+            "Apple Developer error 3050 (Please select a team): No active developer team was found automatically for this Apple ID. Because this is a free Apple ID, Apple's portal does not list teams via API. Since you previously used this Apple ID with Xcode on a Mac, please enter your 10-character Personal Team ID (from Xcode Settings > Accounts or Mac Keychain) to proceed with signing.".into(),
         ))
     }
 
@@ -1447,5 +1447,63 @@ impl AppleService for AppleDeveloperClient {
             profile_data,
             expires_at: now + 7 * 86400,
         })
+    }
+
+    async fn set_team_id(&mut self, team_id: &str) -> Result<AppleSessionInfo, WinIpaError> {
+        let team_id_clean = team_id.trim().to_uppercase();
+        if team_id_clean.len() != 10 || !team_id_clean.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return Err(WinIpaError::AppleAuthFailed(
+                "Team ID must be exactly 10 alphanumeric characters (e.g. 7X8Y9Z1A2B)".into(),
+            ));
+        }
+
+        let apple_id = if let Ok(guard) = self.session.lock() {
+            guard.as_ref().map(|s| s.apple_id.clone())
+        } else {
+            None
+        }
+        .or_else(|| get_secret("active_apple_id").ok().flatten())
+        .ok_or_else(|| {
+            WinIpaError::AppleAuthFailed("No active Apple ID session found. Please log in first.".into())
+        })?;
+
+        let mut updated_session: Option<AppleSessionInfo> = None;
+
+        if let Ok(mut guard) = self.session.lock() {
+            if let Some(ref mut s) = *guard {
+                s.team_id = team_id_clean.clone();
+                s.team_name = format!("{} (Personal Team)", s.apple_id);
+                updated_session = Some(s.clone());
+            }
+        }
+
+        let session_info = match updated_session {
+            Some(s) => s,
+            None => {
+                let s = AppleSessionInfo {
+                    apple_id: apple_id.clone(),
+                    team_id: team_id_clean.clone(),
+                    team_name: format!("{apple_id} (Personal Team)"),
+                    account_type: AppleAccountType::Free,
+                    cert_expires_at: Some(
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs()
+                            + 7 * 86400,
+                    ),
+                };
+                if let Ok(mut guard) = self.session.lock() {
+                    *guard = Some(s.clone());
+                }
+                s
+            }
+        };
+
+        if let Ok(info_json) = serde_json::to_string(&session_info) {
+            let _ = store_secret(&format!("info:{apple_id}"), &info_json);
+        }
+
+        Ok(session_info)
     }
 }

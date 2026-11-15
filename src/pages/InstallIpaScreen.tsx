@@ -14,7 +14,7 @@ import {
 import { inspectIpaPackage, pickIpaFile } from "../api/ipa";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { getConnectedDevices } from "../api/device";
-import { appleGetSession, appleLogout } from "../api/apple";
+import { appleGetSession, appleLogout, appleSetTeamId } from "../api/apple";
 import {
   startInstallationPipeline,
   cancelInstallationPipeline,
@@ -98,6 +98,33 @@ export const InstallIpaScreen: React.FC<InstallIpaScreenProps> = ({
   const [pipelineError, setPipelineError] = useState<string | null>(null);
   const [copiedDiagnostics, setCopiedDiagnostics] = useState<boolean>(false);
   const [manualDevModeConfirmed, setManualDevModeConfirmed] = useState<boolean>(false);
+
+  // Team ID Prompt State for Error 3050 / Free Personal Team
+  const [teamIdInput, setTeamIdInput] = useState<string>("");
+  const [teamIdSaving, setTeamIdSaving] = useState<boolean>(false);
+  const [teamIdError, setTeamIdError] = useState<string | null>(null);
+
+  const handleSaveTeamIdAndRetry = async () => {
+    const clean = teamIdInput.trim().toUpperCase();
+    if (clean.length !== 10 || !/^[A-Z0-9]{10}$/.test(clean)) {
+      setTeamIdError("Team ID must be exactly 10 alphanumeric characters (e.g. 7X8Y9Z1A2B).");
+      return;
+    }
+    setTeamIdSaving(true);
+    setTeamIdError(null);
+    try {
+      const updated = await appleSetTeamId(clean);
+      setAppleSession(updated);
+      onSessionRefresh?.();
+      setPipelineError(null);
+      setTeamIdInput("");
+      handleStartInstallation();
+    } catch (err: any) {
+      setTeamIdError(typeof err === "string" ? err : err?.message || "Failed to update Team ID");
+    } finally {
+      setTeamIdSaving(false);
+    }
+  };
 
   // Load prerequisites on mount
   const refreshPrerequisites = useCallback(async () => {
@@ -639,6 +666,105 @@ ${fullSystemReport}`;
 
           <div className="error-card-body">
             <p className="error-message-text">{pipelineError}</p>
+
+            {pipelineError &&
+              (pipelineError.includes("3050") ||
+                pipelineError.toLowerCase().includes("team")) && (
+                <div
+                  className="team-id-fix-box mt-3 p-3 rounded"
+                  style={{
+                    background: "rgba(245, 158, 11, 0.08)",
+                    border: "1px solid rgba(245, 158, 11, 0.3)",
+                    borderRadius: "8px",
+                    padding: "1rem",
+                  }}
+                >
+                  <h4
+                    style={{
+                      fontWeight: 600,
+                      fontSize: "0.95rem",
+                      color: "var(--warning)",
+                      marginBottom: "0.4rem",
+                    }}
+                  >
+                    Enter Personal Team ID
+                  </h4>
+                  <p
+                    style={{
+                      fontSize: "0.85rem",
+                      opacity: 0.9,
+                      marginBottom: "0.6rem",
+                      lineHeight: 1.4,
+                    }}
+                  >
+                    Because this free Apple ID is not enrolled in the paid Developer Program, Apple's API does not list teams automatically. Since you previously used this Apple ID on a Mac, your 10-character Team ID already exists:
+                  </p>
+                  <ul
+                    style={{
+                      fontSize: "0.8rem",
+                      opacity: 0.85,
+                      marginBottom: "0.75rem",
+                      paddingLeft: "1.2rem",
+                      lineHeight: 1.5,
+                    }}
+                  >
+                    <li>
+                      <strong>Xcode on Mac:</strong> Xcode Settings &gt; Accounts &gt; select your Apple ID &gt; Personal Team ID.
+                    </li>
+                    <li>
+                      <strong>Keychain Access on Mac:</strong> Search your Apple ID &gt; look for the 10 characters in parentheses in your certificate name <code>Apple Development: ... (XXXXXXXXXX)</code>.
+                    </li>
+                    <li>
+                      <strong>Xcode Project:</strong> Look for <code>DEVELOPMENT_TEAM = XXXXXXXXXX;</code> in <code>project.pbxproj</code>.
+                    </li>
+                  </ul>
+                  <div
+                    style={{
+                      display: "flex",
+                      gap: "0.5rem",
+                      alignItems: "center",
+                      flexWrap: "wrap",
+                    }}
+                  >
+                    <input
+                      type="text"
+                      className="input font-mono uppercase"
+                      placeholder="e.g. 7A8B9C1D2E"
+                      maxLength={10}
+                      value={teamIdInput}
+                      onChange={(e) => {
+                        setTeamIdInput(e.target.value.toUpperCase());
+                        setTeamIdError(null);
+                      }}
+                      style={{
+                        width: "160px",
+                        padding: "0.4rem 0.6rem",
+                        fontSize: "0.9rem",
+                        textTransform: "uppercase",
+                      }}
+                    />
+                    <button
+                      type="button"
+                      className="btn btn-primary btn-sm"
+                      disabled={teamIdSaving || teamIdInput.trim().length !== 10}
+                      onClick={handleSaveTeamIdAndRetry}
+                    >
+                      {teamIdSaving ? "Saving..." : "Save Team ID & Install"}
+                    </button>
+                  </div>
+                  {teamIdError && (
+                    <p
+                      style={{
+                        color: "var(--danger)",
+                        fontSize: "0.8rem",
+                        marginTop: "0.5rem",
+                      }}
+                    >
+                      {teamIdError}
+                    </p>
+                  )}
+                </div>
+              )}
           </div>
 
           <div className="error-card-actions">

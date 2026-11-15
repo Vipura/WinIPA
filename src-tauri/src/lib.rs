@@ -89,6 +89,13 @@ async fn apple_logout() -> Result<(), WinIpaError> {
 }
 
 #[tauri::command]
+async fn apple_set_team_id(team_id: String) -> Result<AppleSessionInfo, WinIpaError> {
+    let service = get_apple_service();
+    let mut lock = service.lock().await;
+    lock.set_team_id(&team_id).await
+}
+
+#[tauri::command]
 async fn apple_provision_device(
     bundle_id: String,
     udid: String,
@@ -164,6 +171,7 @@ pub fn run() {
             apple_submit_2fa,
             apple_get_session,
             apple_logout,
+            apple_set_team_id,
             apple_provision_device,
             start_installation_pipeline,
             cancel_installation_pipeline,
