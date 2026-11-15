@@ -217,7 +217,22 @@ pub async fn execute_pipeline<R: tauri::Runtime>(
             .join(format!("signed_{}.ipa", uuid::Uuid::new_v4()));
 
         let is_free = session.account_type == crate::apple::AppleAccountType::Free;
-        let cert_pem = String::from_utf8_lossy(&cert.certificate_data).to_string();
+        let cert_pem = if cert
+            .certificate_data
+            .starts_with(b"-----BEGIN CERTIFICATE-----")
+        {
+            String::from_utf8_lossy(&cert.certificate_data).to_string()
+        } else {
+            use base64::Engine;
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&cert.certificate_data);
+            let mut pem = String::from("-----BEGIN CERTIFICATE-----\n");
+            for chunk in b64.as_bytes().chunks(64) {
+                pem.push_str(std::str::from_utf8(chunk).unwrap_or(""));
+                pem.push('\n');
+            }
+            pem.push_str("-----END CERTIFICATE-----\n");
+            pem
+        };
 
         let sign_res = sign_ipa(SigningOptions {
             input_ipa: req.ipa_path.clone(),

@@ -57,6 +57,7 @@ pub struct AppleDeveloperClient {
     pub cookie_jar: Arc<Jar>,
     pub session: Mutex<Option<AppleSessionInfo>>,
     pub session_token: Mutex<Option<String>>,
+    pub session_token_header: Mutex<Option<String>>,
     pub pending_apple_id: Option<String>,
     pub pending_password: Option<String>,
     pub pending_session_id: Option<String>,
@@ -65,9 +66,32 @@ pub struct AppleDeveloperClient {
     pub pending_apple_id_session_id: Option<String>,
 }
 
+/// Helper function to extract a `myacinfo` cookie from Set-Cookie headers.
+fn extract_myacinfo_from_headers(headers: &HeaderMap) -> Option<String> {
+    for cookie in headers.get_all(reqwest::header::SET_COOKIE) {
+        if let Ok(c_str) = cookie.to_str() {
+            for part in c_str.split(';') {
+                let part = part.trim();
+                if let Some(val) = part.strip_prefix("myacinfo=") {
+                    let trimmed = val.trim();
+                    if !trimmed.is_empty() {
+                        return Some(trimmed.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Helper function to extract an Apple session token / myacinfo cookie
 fn extract_apple_session_token(headers: &HeaderMap, fallback: Option<&str>) -> Option<String> {
-    // 1. Direct x-apple-session-token header
+    // 1. Highest priority: myacinfo cookie from Set-Cookie
+    if let Some(myac) = extract_myacinfo_from_headers(headers) {
+        return Some(myac);
+    }
+
+    // 2. Direct x-apple-session-token header
     if let Some(t) = headers
         .get("x-apple-session-token")
         .and_then(|v| v.to_str().ok())
@@ -75,20 +99,6 @@ fn extract_apple_session_token(headers: &HeaderMap, fallback: Option<&str>) -> O
         let trimmed = t.trim();
         if !trimmed.is_empty() {
             return Some(trimmed.to_string());
-        }
-    }
-
-    // 2. Set-Cookie myacinfo cookie
-    for cookie in headers.get_all(reqwest::header::SET_COOKIE) {
-        if let Ok(c_str) = cookie.to_str() {
-            for part in c_str.split(';') {
-                let part = part.trim();
-                if let Some(val) = part.strip_prefix("myacinfo=") {
-                    if !val.is_empty() {
-                        return Some(val.to_string());
-                    }
-                }
-            }
         }
     }
 
@@ -143,6 +153,7 @@ impl AppleDeveloperClient {
             cookie_jar,
             session: Mutex::new(None),
             session_token: Mutex::new(None),
+            session_token_header: Mutex::new(None),
             pending_apple_id: None,
             pending_password: None,
             pending_session_id: None,
@@ -178,9 +189,10 @@ impl AppleDeveloperClient {
     /// Extracts `myacinfo` cookie from the client's cookie jar.
     fn extract_myacinfo_from_jar(&self) -> Option<String> {
         let urls = [
-            reqwest::Url::parse("https://idmsa.apple.com").ok(),
-            reqwest::Url::parse("https://apple.com").ok(),
-            reqwest::Url::parse("https://developerservices2.apple.com").ok(),
+            reqwest::Url::parse("https://idmsa.apple.com/").ok(),
+            reqwest::Url::parse("https://apple.com/").ok(),
+            reqwest::Url::parse("https://developerservices2.apple.com/").ok(),
+            reqwest::Url::parse("https://appstoreconnect.apple.com/").ok(),
         ];
         for u in urls.into_iter().flatten() {
             if let Some(cookie_hdr) = self.cookie_jar.cookies(&u) {
@@ -188,8 +200,9 @@ impl AppleDeveloperClient {
                     for part in c_str.split(';') {
                         let part = part.trim();
                         if let Some(val) = part.strip_prefix("myacinfo=") {
-                            if !val.is_empty() {
-                                return Some(val.to_string());
+                            let trimmed = val.trim();
+                            if !trimmed.is_empty() {
+                                return Some(trimmed.to_string());
                             }
                         }
                     }
@@ -199,13 +212,15 @@ impl AppleDeveloperClient {
         None
     }
 
-    /// Retrieves the active session token from memory, cookie jar, or persistent vault.
+    /// Retrieves the active session token (myacinfo) from memory, cookie jar, or persistent vault.
     fn get_or_restore_session_token(&self) -> Option<String> {
         // 1. In-memory session_token
         if let Ok(guard) = self.session_token.lock() {
             if let Some(ref t) = *guard {
-                if !t.is_empty() {
-                    return Some(t.clone());
+                let trimmed = t.trim();
+                // Reject AuthKit JWT/session tokens starting with AQAA
+                if !trimmed.is_empty() && !trimmed.starts_with("AQAA") {
+                    return Some(trimmed.to_string());
                 }
             }
         }
@@ -221,19 +236,21 @@ impl AppleDeveloperClient {
         // 3. Persistent vault
         if let Ok(Some(apple_id)) = get_secret("active_apple_id") {
             if let Ok(Some(token)) = get_secret(&format!("session:{apple_id}")) {
-                if !token.is_empty() {
+                let trimmed = token.trim();
+                if !trimmed.is_empty() && !trimmed.starts_with("AQAA") {
                     if let Ok(mut guard) = self.session_token.lock() {
-                        *guard = Some(token.clone());
+                        *guard = Some(trimmed.to_string());
                     }
-                    return Some(token);
+                    return Some(trimmed.to_string());
                 }
             }
         }
 
-        // 4. Pending session ID fallback
+        // 4. Pending session ID fallback (only if not an AQAA AuthKit token)
         if let Some(ref pending) = self.pending_session_id {
-            if !pending.is_empty() {
-                return Some(pending.clone());
+            let trimmed = pending.trim();
+            if !trimmed.is_empty() && !trimmed.starts_with("AQAA") {
+                return Some(trimmed.to_string());
             }
         }
 
@@ -316,16 +333,20 @@ impl AppleDeveloperClient {
             )
         })?;
 
-        let url = format!("{DEVELOPER_API_BASE}/{action}");
+        let url = format!("{DEVELOPER_API_BASE}/{action}?clientId=XABBG36SBA");
 
         // Build XML plist body
         let mut plist_dict = plist::Dictionary::new();
         plist_dict.insert("clientId".into(), Value::String("XABBG36SBA".into()));
-        plist_dict.insert("myacinfo".into(), Value::String(token));
+        plist_dict.insert("myacinfo".into(), Value::String(token.clone()));
         plist_dict.insert("protocolVersion".into(), Value::String("QH65B2".into()));
         plist_dict.insert(
             "requestId".into(),
-            Value::String(uuid::Uuid::new_v4().to_string()),
+            Value::String(uuid::Uuid::new_v4().to_string().to_uppercase()),
+        );
+        plist_dict.insert(
+            "userLocale".into(),
+            Value::Array(vec![Value::String("en_US".into())]),
         );
 
         for (k, v) in params {
@@ -345,7 +366,16 @@ impl AppleDeveloperClient {
             .post(&url)
             .header("Content-Type", "text/x-xml-plist")
             .header("User-Agent", "Xcode/15.2 (15C500b)")
+            .header("Cookie", format!("myacinfo={token}"))
             .body(body_bytes);
+
+        if let Ok(guard) = self.session_token_header.lock() {
+            if let Some(ref st) = *guard {
+                if let Ok(hval) = HeaderValue::from_str(st) {
+                    req = req.header("x-apple-session-token", hval);
+                }
+            }
+        }
 
         if let Ok(ani) = self.anisette.get_headers().await {
             let set_header = |headers: &mut HeaderMap, name: &'static str, val: &str| {
@@ -377,7 +407,8 @@ impl AppleDeveloperClient {
             .await
             .map_err(|e| WinIpaError::Timeout(format!("Developer API {action}: {e}")))?;
 
-        if resp.status().as_u16() == 429 {
+        let status = resp.status();
+        if status.as_u16() == 429 {
             return Err(WinIpaError::AppleRateLimited);
         }
 
@@ -386,10 +417,41 @@ impl AppleDeveloperClient {
             diagnostics: None,
         })?;
 
+        let body_preview = String::from_utf8_lossy(&bytes[..std::cmp::min(bytes.len(), 300)]);
+
+        // 1. Detect plain-text session expiration response
+        if body_preview.contains("session has expired") || body_preview.contains("Please log in") {
+            if let Ok(mut lock) = self.session_token.lock() {
+                *lock = None;
+            }
+            return Err(WinIpaError::AppleAuthFailed(
+                "Apple developer session expired. Please click 'Sign Out' in Device & Account and log in again to establish a fresh session.".into(),
+            ));
+        }
+
+        // 2. Detect HTML error/maintenance page
+        if body_preview.trim_start().starts_with("<!DOCTYPE")
+            || body_preview.trim_start().starts_with("<html")
+        {
+            return Err(WinIpaError::AppleAuthFailed(format!(
+                "Apple Developer portal returned an unexpected web page: {}",
+                body_preview.chars().take(150).collect::<String>()
+            )));
+        }
+
+        // 3. Detect non-success HTTP status
+        if !status.is_success() {
+            return Err(WinIpaError::AppleAuthFailed(format!(
+                "Apple Developer service error (HTTP {}): {}",
+                status.as_u16(),
+                body_preview.chars().take(150).collect::<String>()
+            )));
+        }
+
         let plist_resp =
             Value::from_reader(Cursor::new(&bytes)).map_err(|e| WinIpaError::Unknown {
                 message: format!("Failed to parse developer API response plist: {e}"),
-                diagnostics: None,
+                diagnostics: Some(body_preview.chars().take(200).collect()),
             })?;
 
         // Check for Apple Developer Portal error codes
@@ -404,9 +466,14 @@ impl AppleDeveloperClient {
 
                     return match result_code {
                         35 => Err(WinIpaError::AccountLimitReached(err_string.into())),
-                        1100 => Err(WinIpaError::AppleAuthFailed(
-                            "Apple developer session expired. Please click 'Sign Out' in Device & Account and log in again.".into(),
-                        )),
+                        1100 => {
+                            if let Ok(mut lock) = self.session_token.lock() {
+                                *lock = None;
+                            }
+                            Err(WinIpaError::AppleAuthFailed(
+                                "Apple developer session expired. Please click 'Sign Out' in Device & Account and log in again.".into(),
+                            ))
+                        }
                         3038 | 3041 => Err(WinIpaError::AppleRateLimited),
                         _ => Err(WinIpaError::Unknown {
                             message: format!("Apple Developer error {result_code}: {err_string}"),
@@ -425,7 +492,10 @@ impl AppleDeveloperClient {
         &self,
     ) -> Result<Vec<(String, String, AppleAccountType)>, WinIpaError> {
         let params = HashMap::new();
-        let resp = self.call_developer_api("listTeams.action", &params).await?;
+        let resp = match self.call_developer_api("listTeams.action", &params).await {
+            Ok(r) => r,
+            Err(_) => self.call_developer_api("ios/listTeams.action", &params).await?,
+        };
         let mut teams = Vec::new();
         if let Some(dict) = resp.as_dictionary() {
             if let Some(teams_arr) = dict.get("teams").and_then(|v| v.as_array()) {
@@ -659,6 +729,12 @@ impl AppleService for AppleDeveloperClient {
         }
 
         // Direct success without 2FA
+        if let Some(st) = comp_headers.get("x-apple-session-token").and_then(|v| v.to_str().ok()) {
+            if let Ok(mut lock) = self.session_token_header.lock() {
+                *lock = Some(st.to_string());
+            }
+        }
+
         let token_opt = extract_apple_session_token(&comp_headers, None)
             .or_else(|| self.extract_myacinfo_from_jar());
 
@@ -814,6 +890,17 @@ impl AppleService for AppleDeveloperClient {
             self.pending_apple_id_session_id = Some(sid.to_string());
         }
 
+        let verify_session_token = resp_headers
+            .get("x-apple-session-token")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        if let Some(ref st) = verify_session_token {
+            if let Ok(mut lock) = self.session_token_header.lock() {
+                *lock = Some(st.clone());
+            }
+        }
+
         // Send trust request to establish persistent session cookies (Fastlane store_session / 2sv/trust)
         let mut trust_headers = self.build_apple_headers().await.unwrap_or_default();
         trust_headers.insert(
@@ -835,6 +922,11 @@ impl AppleService for AppleDeveloperClient {
                 trust_headers.insert(HeaderName::from_static("x-apple-id-session-id"), val);
             }
         }
+        if let Some(ref st) = verify_session_token {
+            if let Ok(val) = HeaderValue::from_str(st) {
+                trust_headers.insert(HeaderName::from_static("x-apple-session-token"), val);
+            }
+        }
 
         let trust_resp = self
             .http_client
@@ -845,13 +937,13 @@ impl AppleService for AppleDeveloperClient {
 
         let trust_headers_opt = trust_resp.ok().map(|r| r.headers().clone());
 
-        let token_opt = extract_apple_session_token(&resp_headers, None)
+        let myacinfo_opt = trust_headers_opt
+            .as_ref()
+            .and_then(extract_myacinfo_from_headers)
             .or_else(|| self.extract_myacinfo_from_jar())
-            .or_else(|| {
-                trust_headers_opt
-                    .as_ref()
-                    .and_then(|h| extract_apple_session_token(h, None))
-            });
+            .or_else(|| extract_myacinfo_from_headers(&resp_headers));
+
+        let token_opt = myacinfo_opt.or(verify_session_token);
 
         if let Some(ref token) = token_opt {
             if let Ok(mut lock) = self.session_token.lock() {
@@ -1012,10 +1104,46 @@ impl AppleService for AppleDeveloperClient {
         params.insert("deviceNumber".into(), udid.to_string());
         params.insert("name".into(), name.to_string());
         if team_id != "PERSONAL" && !team_id.is_empty() {
-            params.insert("teamId".into(), team_id);
+            params.insert("teamId".into(), team_id.clone());
         }
 
-        let resp = self.call_developer_api("addDevice.action", &params).await?;
+        let resp_res = self.call_developer_api("ios/addDevice.action", &params).await;
+
+        let resp = match resp_res {
+            Ok(v) => v,
+            Err(e) => {
+                // If device registration fails because it's already registered, query listDevices
+                let mut list_params = HashMap::new();
+                if team_id != "PERSONAL" && !team_id.is_empty() {
+                    list_params.insert("teamId".into(), team_id.clone());
+                }
+                if let Ok(list_resp) = self
+                    .call_developer_api("ios/listDevices.action", &list_params)
+                    .await
+                {
+                    if let Some(dict) = list_resp.as_dictionary() {
+                        if let Some(devices) = dict.get("devices").and_then(|v| v.as_array()) {
+                            for dev in devices {
+                                if let Some(d) = dev.as_dictionary() {
+                                    let dev_num = d
+                                        .get("deviceNumber")
+                                        .and_then(|v| v.as_string())
+                                        .unwrap_or("");
+                                    if dev_num.eq_ignore_ascii_case(udid) {
+                                        if let Some(id) =
+                                            d.get("deviceId").and_then(|v| v.as_string())
+                                        {
+                                            return Ok(id.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                return Err(e);
+            }
+        };
 
         // Extract device ID from response
         if let Some(dict) = resp.as_dictionary() {
@@ -1037,12 +1165,48 @@ impl AppleService for AppleDeveloperClient {
         let team_id = self.get_current_team_id();
         let mut params = HashMap::new();
         params.insert("identifier".into(), bundle_id.to_string());
-        params.insert("name".into(), name.to_string());
+        params.insert("name".into(), format!("WinIPA {name}"));
         if team_id != "PERSONAL" && !team_id.is_empty() {
-            params.insert("teamId".into(), team_id);
+            params.insert("teamId".into(), team_id.clone());
         }
 
-        let resp = self.call_developer_api("addAppId.action", &params).await?;
+        let resp_res = self.call_developer_api("ios/addAppId.action", &params).await;
+
+        let resp = match resp_res {
+            Ok(v) => v,
+            Err(e) => {
+                // If App ID registration fails because it's already registered, query listAppIds
+                let mut list_params = HashMap::new();
+                if team_id != "PERSONAL" && !team_id.is_empty() {
+                    list_params.insert("teamId".into(), team_id.clone());
+                }
+                if let Ok(list_resp) = self
+                    .call_developer_api("ios/listAppIds.action", &list_params)
+                    .await
+                {
+                    if let Some(dict) = list_resp.as_dictionary() {
+                        if let Some(app_ids) = dict.get("appIds").and_then(|v| v.as_array()) {
+                            for app in app_ids {
+                                if let Some(ad) = app.as_dictionary() {
+                                    let ident = ad
+                                        .get("identifier")
+                                        .and_then(|v| v.as_string())
+                                        .unwrap_or("");
+                                    if ident.eq_ignore_ascii_case(bundle_id) {
+                                        if let Some(id) =
+                                            ad.get("appIdId").and_then(|v| v.as_string())
+                                        {
+                                            return Ok(id.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                return Err(e);
+            }
+        };
 
         if let Some(dict) = resp.as_dictionary() {
             if let Some(app_id) = dict.get("appId").and_then(|v| v.as_dictionary()) {
@@ -1062,23 +1226,88 @@ impl AppleService for AppleDeveloperClient {
         let mut params = HashMap::new();
         params.insert("csrContent".into(), key_pair.csr_pem.clone());
         if team_id != "PERSONAL" && !team_id.is_empty() {
-            params.insert("teamId".into(), team_id);
+            params.insert("teamId".into(), team_id.clone());
         }
 
-        let resp = self
-            .call_developer_api("addDevelopmentCert.action", &params)
-            .await?;
+        let resp_res = self
+            .call_developer_api("ios/submitDevelopmentCSR.action", &params)
+            .await;
+
+        let resp = match resp_res {
+            Ok(v) => v,
+            Err(ref e) => {
+                let err_str = e.to_string();
+                if err_str.contains("7460")
+                    || err_str.contains("already have a current iOS Development certificate")
+                {
+                    // Query existing certificates, revoke stale cert, and retry CSR submission
+                    let mut list_params = HashMap::new();
+                    if team_id != "PERSONAL" && !team_id.is_empty() {
+                        list_params.insert("teamId".into(), team_id.clone());
+                    }
+                    if let Ok(list_resp) = self
+                        .call_developer_api("ios/listAllDevelopmentCerts.action", &list_params)
+                        .await
+                    {
+                        if let Some(dict) = list_resp.as_dictionary() {
+                            if let Some(certs) = dict.get("certificates").and_then(|v| v.as_array())
+                            {
+                                for c in certs {
+                                    if let Some(cd) = c.as_dictionary() {
+                                        if let Some(serial) =
+                                            cd.get("serialNumber").and_then(|v| v.as_string())
+                                        {
+                                            let mut rev_params = HashMap::new();
+                                            rev_params.insert("serialNumber".into(), serial.to_string());
+                                            if team_id != "PERSONAL" && !team_id.is_empty() {
+                                                rev_params.insert("teamId".into(), team_id.clone());
+                                            }
+                                            let _ = self
+                                                .call_developer_api(
+                                                    "ios/revokeDevelopmentCert.action",
+                                                    &rev_params,
+                                                )
+                                                .await;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Retry submission once
+                    self.call_developer_api("ios/submitDevelopmentCSR.action", &params)
+                        .await?
+                } else {
+                    return Err(resp_res.err().unwrap());
+                }
+            }
+        };
 
         let mut cert_data = Vec::new();
         let mut cert_id = uuid::Uuid::new_v4().to_string();
 
         if let Some(dict) = resp.as_dictionary() {
-            if let Some(cert) = dict.get("certRequest").and_then(|v| v.as_dictionary()) {
-                if let Some(id) = cert.get("certRequestId").and_then(|v| v.as_string()) {
+            let cert_dict = dict
+                .get("certRequest")
+                .or_else(|| dict.get("developerCertificate"))
+                .and_then(|v| v.as_dictionary());
+
+            if let Some(cert) = cert_dict {
+                if let Some(id) = cert
+                    .get("certRequestId")
+                    .or_else(|| cert.get("certificateId"))
+                    .and_then(|v| v.as_string())
+                {
                     cert_id = id.to_string();
                 }
                 if let Some(data) = cert.get("certContent").and_then(|v| v.as_data()) {
                     cert_data = data.to_vec();
+                } else if let Some(s) = cert.get("certContent").and_then(|v| v.as_string()) {
+                    if let Ok(decoded) = BASE64.decode(s.trim()) {
+                        cert_data = decoded;
+                    } else {
+                        cert_data = s.as_bytes().to_vec();
+                    }
                 }
             }
         }
@@ -1112,7 +1341,7 @@ impl AppleService for AppleDeveloperClient {
         }
 
         let resp = self
-            .call_developer_api("downloadTeamProvisioningProfile.action", &params)
+            .call_developer_api("ios/downloadTeamProvisioningProfile.action", &params)
             .await?;
 
         let mut profile_data = Vec::new();
@@ -1128,6 +1357,12 @@ impl AppleService for AppleDeveloperClient {
                 }
                 if let Some(data) = prof.get("encodedProfile").and_then(|v| v.as_data()) {
                     profile_data = data.to_vec();
+                } else if let Some(s) = prof.get("encodedProfile").and_then(|v| v.as_string()) {
+                    if let Ok(decoded) = BASE64.decode(s.trim()) {
+                        profile_data = decoded;
+                    } else {
+                        profile_data = s.as_bytes().to_vec();
+                    }
                 }
             }
         }

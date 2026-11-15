@@ -73,8 +73,32 @@ pub fn find_zsign_binary() -> Result<PathBuf, WinIpaError> {
         }
     }
 
+    // 5. Automatic embedded fallback: extract bundled zsign.exe to local appdata or temp
+    const EMBEDDED_ZSIGN: &[u8] = include_bytes!("../../bin/zsign.exe");
+    let fallback_dirs = [
+        std::env::var("LOCALAPPDATA")
+            .ok()
+            .map(|p| PathBuf::from(p).join("WinIPA").join("bin")),
+        std::env::var("APPDATA")
+            .ok()
+            .map(|p| PathBuf::from(p).join("WinIPA").join("bin")),
+        Some(std::env::temp_dir().join("WinIPA").join("bin")),
+    ];
+
+    for dir_opt in fallback_dirs.into_iter().flatten() {
+        if std::fs::create_dir_all(&dir_opt).is_ok() {
+            let target = dir_opt.join("zsign.exe");
+            if target.exists() {
+                return Ok(target);
+            }
+            if std::fs::write(&target, EMBEDDED_ZSIGN).is_ok() {
+                return Ok(target);
+            }
+        }
+    }
+
     Err(WinIpaError::SigningFailed(
-        "Could not find 'zsign.exe' signing tool. Please ensure zsign is placed in WinIPA's bin folder."
+        "Could not find or extract 'zsign.exe' signing tool. Please ensure zsign is placed in WinIPA's bin folder."
             .into(),
     ))
 }
