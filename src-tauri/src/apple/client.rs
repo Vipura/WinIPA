@@ -191,8 +191,10 @@ impl AppleDeveloperClient {
         let urls = [
             reqwest::Url::parse("https://idmsa.apple.com/").ok(),
             reqwest::Url::parse("https://apple.com/").ok(),
+            reqwest::Url::parse("https://www.apple.com/").ok(),
             reqwest::Url::parse("https://developerservices2.apple.com/").ok(),
             reqwest::Url::parse("https://appstoreconnect.apple.com/").ok(),
+            reqwest::Url::parse("https://developer.apple.com/").ok(),
         ];
         for u in urls.into_iter().flatten() {
             if let Some(cookie_hdr) = self.cookie_jar.cookies(&u) {
@@ -384,11 +386,41 @@ impl AppleDeveloperClient {
         action: &str,
         params: &HashMap<String, String>,
     ) -> Result<Value, WinIpaError> {
-        let token = self.get_or_restore_session_token().ok_or_else(|| {
-            WinIpaError::AppleAuthFailed(
-                "No active Apple developer session. Please click 'Sign Out' in Device & Account and log in again to establish a fresh session.".into(),
-            )
-        })?;
+        // Restore session_token_header from vault if not in memory (needed for token exchange)
+        {
+            if let Ok(mut guard) = self.session_token_header.lock() {
+                if guard.is_none() {
+                    if let Ok(Some(apple_id)) = get_secret("active_apple_id") {
+                        if let Ok(Some(st)) = get_secret(&format!("token_header:{apple_id}")) {
+                            *guard = Some(st);
+                        }
+                    }
+                }
+            }
+        }
+
+        // If we have no myacinfo but we have a session token header (AuthKit JWT from 2FA),
+        // attempt a token exchange: use the AuthKit JWT as the myacinfo value.
+        // Apple will respond with a Set-Cookie: myacinfo=<real_value> which we capture.
+        let token = match self.get_or_restore_session_token() {
+            Some(t) => t,
+            None => {
+                // Try using the session_token_header as a bootstrap token
+                let st = self
+                    .session_token_header
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.clone());
+                match st {
+                    Some(t) => t,
+                    None => {
+                        return Err(WinIpaError::AppleAuthFailed(
+                            "No active Apple developer session. Please click 'Sign Out' in Device & Account and log in again to establish a fresh session.".into(),
+                        ));
+                    }
+                }
+            }
+        };
 
         let url = format!("{DEVELOPER_API_BASE}/{action}?clientId=XABBG36SBA");
 
@@ -417,17 +449,6 @@ impl AppleDeveloperClient {
                 diagnostics: None,
             }
         })?;
-
-        // Ensure session_token_header is restored from vault if not currently in memory
-        if let Ok(mut guard) = self.session_token_header.lock() {
-            if guard.is_none() {
-                if let Ok(Some(apple_id)) = get_secret("active_apple_id") {
-                    if let Ok(Some(st)) = get_secret(&format!("token_header:{apple_id}")) {
-                        *guard = Some(st);
-                    }
-                }
-            }
-        }
 
         let mut req = self
             .http_client
@@ -485,6 +506,18 @@ impl AppleDeveloperClient {
         let status = resp.status();
         if status.as_u16() == 429 {
             return Err(WinIpaError::AppleRateLimited);
+        }
+
+        // Opportunistically capture myacinfo from developer API response Set-Cookie headers.
+        // On the first call after 2FA+trust, Apple may issue a fresh myacinfo cookie here.
+        let resp_set_cookie_myacinfo = extract_myacinfo_from_headers(resp.headers());
+        if let Some(ref new_myacinfo) = resp_set_cookie_myacinfo {
+            if let Ok(mut lock) = self.session_token.lock() {
+                *lock = Some(new_myacinfo.clone());
+            }
+            if let Ok(Some(apple_id)) = get_secret("active_apple_id") {
+                let _ = store_secret(&format!("session:{apple_id}"), new_myacinfo);
+            }
         }
 
         let bytes = resp.bytes().await.map_err(|e| WinIpaError::Unknown {
@@ -1199,7 +1232,27 @@ impl AppleService for AppleDeveloperClient {
             .send()
             .await;
 
-        let trust_headers_opt = trust_resp.ok().map(|r| r.headers().clone());
+        // Write debug info to vault for diagnostics
+        {
+            let verify_st_present = verify_session_token.is_some();
+            let trust_status = trust_resp.as_ref().ok().map(|r| r.status().as_u16());
+            let _ = store_secret(
+                "debug:last_2fa_state",
+                &format!(
+                    "verify_st={} trust_status={:?} scnt={} id_sid={}",
+                    verify_st_present,
+                    trust_status,
+                    self.pending_scnt.is_some(),
+                    self.pending_apple_id_session_id.is_some(),
+                ),
+            );
+        }
+
+        let trust_headers_opt = trust_resp.ok().map(|r| {
+            let h = r.headers().clone();
+            // Also try to capture myacinfo from jar after trust completes
+            h
+        });
 
         // Extract session token from verify response, trust response, or pending complete response
         let final_session_token = verify_session_token
