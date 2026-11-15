@@ -21,6 +21,7 @@ import {
   listenToPipelineStatus,
 } from "../api/pipeline";
 import { getRedactedDiagnostics } from "../api/diagnostics";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   ArrowLeft,
   UploadCloud,
@@ -38,6 +39,7 @@ import {
   Check,
   Info,
   LogOut,
+  ExternalLink,
 } from "lucide-react";
 
 interface InstallIpaScreenProps {
@@ -640,6 +642,21 @@ ${fullSystemReport}`;
           </div>
 
           <div className="error-card-actions">
+            {pipelineError && pipelineError.includes("developer.apple.com") && (
+              <button
+                type="button"
+                className="btn btn-outline btn-sm"
+                onClick={() => {
+                  openUrl("https://developer.apple.com/account").catch(() => {
+                    window.open("https://developer.apple.com/account", "_blank");
+                  });
+                }}
+                style={{ display: "inline-flex", gap: "0.4rem", alignItems: "center" }}
+              >
+                <ExternalLink size={14} />
+                <span>Open Apple Developer Portal</span>
+              </button>
+            )}
             <button
               type="button"
               className="btn btn-outline btn-sm"
