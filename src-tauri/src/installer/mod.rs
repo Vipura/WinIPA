@@ -4,15 +4,18 @@
 pub mod afc;
 pub mod proxy;
 
-use crate::device::lockdown::start_lockdown_service;
 use crate::device::usbmux::{
-    connect_to_device_port, connect_usbmuxd, parse_usbmux_event, read_usbmux_packet,
-    send_listen_request, UsbmuxEvent,
+    connect_usbmuxd, parse_usbmux_event, read_usbmux_packet, send_listen_request, UsbmuxEvent,
 };
 use crate::errors::WinIpaError;
-use afc::{afc_remove_file, upload_file_afc};
 use async_trait::async_trait;
-use proxy::install_package_proxy;
+use idevice::afc::opcode::AfcFopenMode;
+use idevice::afc::AfcClient;
+use idevice::pairing_file::PairingFile;
+use idevice::provider::{IdeviceProvider, UsbmuxdProvider};
+use idevice::services::installation_proxy::InstallationProxyClient;
+use idevice::usbmuxd::UsbmuxdAddr;
+use idevice::{Idevice, IdeviceError, IdeviceService};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -37,6 +40,58 @@ pub trait InstallerService: Send + Sync {
         progress_sender: Option<Sender<InstallProgress>>,
         cancel_token: Arc<AtomicBool>,
     ) -> Result<(), WinIpaError>;
+}
+
+/// Custom device provider that wraps UsbmuxdProvider with Windows Lockdown directory fallback.
+#[derive(Debug, Clone)]
+pub struct WinIpaDeviceProvider {
+    pub inner: UsbmuxdProvider,
+}
+
+impl IdeviceProvider for WinIpaDeviceProvider {
+    fn connect(
+        &self,
+        port: u16,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Idevice, IdeviceError>> + Send>> {
+        self.inner.connect(port)
+    }
+
+    fn label(&self) -> &str {
+        self.inner.label()
+    }
+
+    fn get_pairing_file(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<PairingFile, IdeviceError>> + Send>> {
+        let inner = self.inner.clone();
+        let udid = self.inner.udid.clone();
+        Box::pin(async move {
+            // 1. First attempt: Query pair record from usbmuxd directly
+            if let Ok(pf) = inner.get_pairing_file().await {
+                return Ok(pf);
+            }
+
+            // 2. Fallback: Search Windows Lockdown pairing records on disk
+            #[cfg(windows)]
+            {
+                let candidates = [
+                    format!(r"C:\ProgramData\Apple\Lockdown\{udid}.plist"),
+                    format!(r"C:\ProgramData\Apple\Lockdown\{}.plist", udid.replace('-', "")),
+                    format!(r"C:\ProgramData\Apple\Lockdown\{}.plist", udid.to_uppercase()),
+                    format!(r"C:\ProgramData\Apple\Lockdown\{}.plist", udid.to_lowercase()),
+                ];
+                for path in &candidates {
+                    if let Ok(pf) = PairingFile::read_from_file(path) {
+                        return Ok(pf);
+                    }
+                }
+            }
+
+            Err(IdeviceError::UnexpectedResponse(
+                "Device pairing file not found in usbmuxd or Lockdown folder. Please unlock device and trust this PC.".into(),
+            ))
+        })
+    }
 }
 
 /// Real USB installer communicating through usbmuxd to Apple Mobile Device Service.
@@ -100,55 +155,170 @@ impl InstallerService for DeviceUsbInstaller {
             }
         };
 
-        report(0.0, "Connecting to device lockdown service...");
+        report(0.0, "Establishing authenticated lockdown session with iPhone...");
 
-        // 2. Connect to lockdown (port 62078)
-        let mut lockdown_stream = connect_to_device_port(device_id, 62078).await?;
+        // 2. Setup provider with Windows pairing file support
+        let usbmuxd_provider = UsbmuxdProvider {
+            addr: UsbmuxdAddr::default(),
+            tag: 1,
+            udid: udid.to_string(),
+            device_id,
+            label: "WinIPA".to_string(),
+        };
+        let provider = WinIpaDeviceProvider {
+            inner: usbmuxd_provider,
+        };
 
-        // 3. Start com.apple.afc service
-        report(5.0, "Starting Apple File Conduit (AFC) service...");
-        let afc_port = start_lockdown_service(&mut lockdown_stream, "com.apple.afc").await?;
+        // 3. Connect to Apple File Conduit (AFC) over encrypted TLS lockdown session
+        report(5.0, "Starting Apple File Conduit (AFC) secure service...");
+        let mut afc = AfcClient::connect(&provider).await.map_err(|e| {
+            WinIpaError::InstallFailed(format!("Failed to connect to Apple File Conduit: {e}"))
+        })?;
 
-        // 4. Connect to AFC port and upload IPA to staging
-        let mut afc_stream = connect_to_device_port(device_id, afc_port).await?;
+        let _ = afc.mk_dir("PublicStaging").await;
+
         let staging_file_name = format!("PublicStaging/winipa_{}.ipa", uuid::Uuid::new_v4());
+        let mut fd = afc
+            .open(&staging_file_name, AfcFopenMode::WrOnly)
+            .await
+            .map_err(|e| {
+                WinIpaError::InstallFailed(format!("Failed to open staging file on device: {e}"))
+            })?;
 
-        let upload_res = upload_file_afc(
-            &mut afc_stream,
-            signed_ipa_path,
-            &staging_file_name,
-            |pct, msg| report(pct, msg),
-            cancel_token.clone(),
-        )
-        .await;
+        // 4. Stream upload IPA to device PublicStaging
+        let file_bytes = tokio::fs::read(signed_ipa_path).await.map_err(|e| {
+            WinIpaError::InvalidIpa(format!("Failed to read signed IPA file: {e}"))
+        })?;
+        let total_bytes = file_bytes.len();
+        let total_mb = total_bytes as f64 / (1024.0 * 1024.0);
+        let chunk_size = 256 * 1024; // 256 KB chunks
+        let mut offset = 0;
 
-        if let Err(e) = upload_res {
-            let _ = afc_remove_file(&mut afc_stream, &staging_file_name).await;
-            return Err(e);
+        while offset < total_bytes {
+            if cancel_token.load(Ordering::Relaxed) {
+                let _ = fd.close().await;
+                let _ = afc.remove(&staging_file_name).await;
+                return Err(WinIpaError::Unknown {
+                    message: "Installation cancelled by user".into(),
+                    diagnostics: None,
+                });
+            }
+
+            let end = (offset + chunk_size).min(total_bytes);
+            if let Err(e) = fd.write_entire(&file_bytes[offset..end]).await {
+                let _ = fd.close().await;
+                let _ = afc.remove(&staging_file_name).await;
+                return Err(WinIpaError::InstallFailed(format!(
+                    "Failed uploading package to iPhone: {e}"
+                )));
+            }
+
+            offset = end;
+            let uploaded_mb = offset as f64 / (1024.0 * 1024.0);
+            let upload_pct = (offset as f32 / total_bytes as f32) * 100.0;
+            let overall_pct = 5.0 + (upload_pct * 0.45); // 5% -> 50%
+            report(
+                overall_pct,
+                &format!(
+                    "Uploading package over USB: {:.1} MB / {:.1} MB ({:.0}%)",
+                    uploaded_mb, total_mb, upload_pct
+                ),
+            );
         }
 
-        // 5. Start com.apple.mobile.installation_proxy service
+        let _ = fd.close().await;
+        drop(afc);
+
+        // 5. Connect to iOS Installation Proxy over authenticated TLS lockdown session
         report(50.0, "Starting iOS installation proxy...");
-        let proxy_port =
-            start_lockdown_service(&mut lockdown_stream, "com.apple.mobile.installation_proxy")
-                .await?;
+        let mut inst = InstallationProxyClient::connect(&provider)
+            .await
+            .map_err(|e| {
+                WinIpaError::InstallFailed(format!("Failed to start installation proxy: {e}"))
+            })?;
 
-        let mut proxy_stream = connect_to_device_port(device_id, proxy_port).await?;
+        let options = plist::Value::Dictionary({
+            let mut d = plist::Dictionary::new();
+            d.insert("PackageType".into(), "Developer".into());
+            d.insert("CFBundleIdentifier".into(), bundle_id.into());
+            d
+        });
 
-        // 6. Perform installation
-        let install_res = install_package_proxy(
-            &mut proxy_stream,
-            &staging_file_name,
-            bundle_id,
-            |pct, msg| report(pct, msg),
-            cancel_token.clone(),
-        )
-        .await;
+        // 6. Perform installation with real-time SpringBoard/AMFI progress callbacks
+        let tx = progress_sender.clone();
+        let cancel = cancel_token.clone();
+        let cb = move |(percent, _): (u64, ())| {
+            let tx = tx.clone();
+            let cancel = cancel.clone();
+            async move {
+                if cancel.load(Ordering::Relaxed) {
+                    return;
+                }
+                let overall_percent = 50.0 + (percent as f32 * 0.5);
+                let friendly_status = match percent {
+                    0..=10 => "Acquiring device install assertion...",
+                    11..=25 => "Creating sandbox staging directory...",
+                    26..=50 => "Extracting package contents on iPhone...",
+                    51..=80 => "Verifying code signatures and entitlements...",
+                    81..=99 => "Registering app in iOS SpringBoard...",
+                    _ => "Installation complete!",
+                };
+                if let Some(ref sender) = tx {
+                    let _ = sender.try_send(InstallProgress {
+                        percent: overall_percent,
+                        status: friendly_status.to_string(),
+                    });
+                }
+            }
+        };
+
+        let install_res = inst
+            .install_with_callback(&staging_file_name, Some(options.clone()), cb, ())
+            .await;
+
+        let final_res = match install_res {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                // If standard install failed, attempt upgrade in case package is already present
+                inst.upgrade_with_callback(&staging_file_name, Some(options), |_| async {}, ())
+                    .await
+                    .map_err(|_| e)
+            }
+        };
 
         // 7. Clean up remote staging file via AFC
-        let _ = afc_remove_file(&mut afc_stream, &staging_file_name).await;
+        if let Ok(mut cleanup_afc) = AfcClient::connect(&provider).await {
+            let _ = cleanup_afc.remove(&staging_file_name).await;
+        }
 
-        install_res?;
+        // 8. Handle any errors from installation proxy with user-friendly diagnostics
+        if let Err(e) = final_res {
+            let err_str = e.to_string();
+            if err_str.contains("ApplicationVerificationFailed") {
+                return Err(WinIpaError::InstallFailed(format!(
+                    "Application verification failed on device ({err_str}). Ensure your developer certificate is trusted and entitlements match the provisioning profile."
+                )));
+            } else if err_str.contains("MismatchedApplicationIdentifierEntitlement") {
+                return Err(WinIpaError::InstallFailed(format!(
+                    "Application identifier mismatch ({err_str}). The bundle identifier must match your App ID."
+                )));
+            } else if err_str.contains("DeviceNotRegistered") {
+                return Err(WinIpaError::InstallFailed(
+                    "Your iPhone UDID is not registered in this provisioning profile.".into(),
+                ));
+            } else if err_str.contains("DeveloperModeNotEnabled") {
+                return Err(WinIpaError::InstallFailed(
+                    "Developer Mode is not enabled on your iPhone. Please go to Settings -> Privacy & Security -> Developer Mode to enable it.".into(),
+                ));
+            } else if err_str.contains("PasswordProtected") || err_str.contains("DeviceLocked") {
+                return Err(WinIpaError::DeviceLocked);
+            } else {
+                return Err(WinIpaError::InstallFailed(format!(
+                    "iPhone rejected installation: {err_str}"
+                )));
+            }
+        }
+
         report(100.0, "Installation complete!");
         Ok(())
     }

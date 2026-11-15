@@ -5,7 +5,7 @@ export const STRINGS = {
   app: {
     title: "WinIPA",
     tagline: "Test your iOS apps on your iPhone from Windows without a Mac",
-    version: "v0.1.16",
+    version: "v0.1.17",
     gplNotice: "Open source under GNU GPL v3.0. No telemetry.",
   },
   nav: {
