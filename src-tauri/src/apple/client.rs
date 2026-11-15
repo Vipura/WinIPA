@@ -609,12 +609,8 @@ impl AppleDeveloperClient {
                             if let Ok(mut lock) = self.session_token_header.lock() {
                                 *lock = None;
                             }
-                            if let Ok(Some(apple_id)) = get_secret("active_apple_id") {
-                                let _ = delete_secret(&format!("token_header:{apple_id}"));
-                                let _ = delete_secret(&format!("session:{apple_id}"));
-                            }
                             Err(WinIpaError::AppleAuthFailed(
-                                format!("Your Apple Developer session requires two-factor authentication refresh (Apple error {result_code}). Please click 'Log Out & Sign In Again' to authenticate with your 6-digit 2FA code."),
+                                format!("Your Apple Developer session requires two-factor authentication refresh (Apple error {result_code} on '{action}': {err_string}). Please click 'Log Out & Sign In Again' to authenticate with your 6-digit 2FA code."),
                             ))
                         }
                         3038 | 3041 => Err(WinIpaError::AppleRateLimited),
